@@ -1,0 +1,9 @@
+.cache/
+.verification/
+dist/
+dev/web/node_modules/
+dev/web/dist/
+__pycache__/
+.pytest_cache/
+.DS_Store
+.playwright-cli/

@@ -1,0 +1,157 @@
+<div align="center">
+
+# Agent Paper Reader
+### Agent 文献译读
+
+**Read the document, its translation, and contextual explanations in one place.**
+
+[简体中文](README.md) · English
+
+[Demo](#see-it-in-action) · [Get started](#get-started) · [Example](examples/reading-showcase.html) · [Local library guide](references/library.md)
+
+</div>
+
+![Offline bilingual reader with an outline, aligned paragraphs, and contextual glossary](docs/media/bilingual-reader.png)
+
+A **Skill** that turns an English text-based PDF or Markdown document or article into a self-contained bilingual HTML reader. Your current Agent reads the context, translates, organizes terminology, and reviews the result. **No local server is required by default, and no separate translation API key is needed.**
+
+Version 1 supports **English → Simplified Chinese**. An optional local library adds multi-document management, saved annotations, and translation revisions. Skill instructions and reference guides are currently in Chinese.
+
+## What can I read?
+
+Research papers, reports, technical documentation, industry analysis, and ordinary English articles use the same reading workflow. Preserve the source structure; an article does not need an academic format.
+
+**Inputs remain text-based PDF or UTF-8 Markdown.** Provide web articles as files in one of these formats. Direct URL fetching, Word files, scanned documents, and other language directions are outside this version.
+
+## See it in action
+
+### Follow a sentence across both languages
+
+Hover to highlight the corresponding content; click to keep it selected, then click again to clear it. Paragraph actions stay inside the “…” menu.
+
+![Recorded interaction: hover linking, selection, and deselection](docs/media/sentence-linking.gif)
+
+**[Watch the 42-second demo · MP4](docs/media/reader-demo.mp4)**: sentence linking → contextual term → original PDF → second paper → review notes → translation editor. Download the video if GitHub does not play it inline.
+
+### Context for terms. A way back to the source.
+
+| Contextual glossary | Original PDF page |
+| --- | --- |
+| ![MPIML definition from the paragraph tools](docs/media/context-glossary.png) | ![Original page shown within the reader](docs/media/source-location.png) |
+| Inspect terms relevant to the paragraph. | Check the original layout, figures, and wording. |
+
+### Keep notes when you need them
+
+The optional local library separates glossary and notes into tabs and preserves translation revision history. This capture shows the second paper and an existing review note.
+
+![HarnessProvisioning paper with a review note in the local library](docs/media/review-notes.png)
+
+<details>
+<summary>View the translation editor</summary>
+
+![Translation editor with source text and revision history](docs/media/translation-editor.png)
+
+</details>
+
+These are actual browser captures from two processed papers. See [media provenance](docs/media/README.md). Their full PDFs and translations are not included in this repository.
+
+## How it works
+
+1. **Give your Agent a document** and a separate workspace directory.
+2. **Understand and translate**: inspect extracted text and original pages, organize structure and terms, translate, and align semantic units.
+3. **Review and validate**: the Agent performs a second review; deterministic scripts check coverage, versions, and data completeness. Work can resume after interruption.
+4. **Export and read**: open the standalone HTML. Start the optional local library only when you need to save notes or revisions.
+
+The Skill defines the workflow; the Agent provides understanding and translation; scripts process and validate data; HTML provides the reader. Importing alone does **not** invoke a model. Translation uses the host Agent's session and usage allowance.
+
+## Get started
+
+### 1. Install the complete Skill folder
+
+**Recommended: [download the v0.1.0 compact Skill package](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip)** and install the extracted `agent-paper-reader/` folder.
+
+This repository is itself a Skill, with [SKILL.md](SKILL.md) as its entry point. Place the complete contents in a Skill directory supported by your Agent. **Do not copy only SKILL.md.** For a project supporting `.agents/skills`:
+
+```text
+my-project/
+└── .agents/skills/agent-paper-reader/
+    ├── SKILL.md
+    ├── scripts/
+    ├── references/
+    ├── assets/
+    └── …
+```
+
+Alternatively, run `python3 dev/package_skill.py` and install the folder inside `dist/agent-paper-reader.zip`. This compact package contains runtime resources only. Discovery paths vary by host; if needed, explicitly ask the Agent to read the installed `SKILL.md`.
+
+Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. The Agent must be able to read/write files, run commands, and inspect pages.
+
+### 2. Ask your Agent
+
+```text
+Use the agent-paper-reader Skill to turn /absolute/path/paper.pdf
+into an offline English–Simplified Chinese reading HTML.
+
+Use /absolute/path/paper-reader-workspace as the workspace.
+Organize the full document and its key terms, translate and align it,
+and complete a second review. Do not start a server by default.
+Return the HTML file and any processing limitations.
+```
+
+Keep the workspace **outside the Skill installation directory**. It stores originals, progress, and reading data, so updating the Skill does not require translating again.
+
+### 3. Open the HTML
+
+The export includes the resources required for reading. To try a ready-made result, download the repository and open:
+
+- **[Full feature example](examples/reading-showcase.html)**: original fictional teaching material with four outline levels, 8 terms, 3 notes, revision history, equations, and a diagram.
+- **[PDF source-location sample](examples/cooling-study.html)** with its [source PDF](examples/cooling-study.pdf).
+
+GitHub's file preview does not run these HTML files; download and open them in a browser.
+
+## Offline HTML or optional local library?
+
+| Capability | Offline HTML | Local library |
+| --- | --- | --- |
+| Bilingual text, sentence linking, outline, search | ✓ | ✓ |
+| Contextual glossary and source lookup | ✓ | ✓ |
+| View exported notes and revisions | ✓ | ✓ |
+| Save new highlights, notes, and questions | — | ✓ |
+| Edit translations and retain revision history | — | ✓ |
+| Manage multiple documents and resume work | — | ✓ |
+
+HTML is a **read-only snapshot**. Retain the workspace to continue editing; importing an HTML snapshot back into the library is not supported. Translation edits require review of the current version before re-export.
+
+The [local library guide](references/library.md) covers startup, existing documents, annotations, revisions, recovery, and conflicts.
+
+<details>
+<summary>Command-line entry points and workspace layout</summary>
+
+```sh
+python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library setup
+python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library import /path/to/paper.pdf
+# After the Agent completes structure, translation, alignment, and review:
+python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library export DOCUMENT_ID
+# Only when management and editing are needed:
+python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library serve --port 8765
+```
+
+Windows can use `py -3.12`, but has not been tested. The workspace contains `data/`, `exports/`, `submissions/`, `.runtime/`, and `.cache/`. After setup, exporting and reading require no network; model connectivity depends on the host Agent.
+
+</details>
+
+## Current limits
+
+- Text-based PDF and UTF-8 Markdown only; no OCR. More input formats and configurable languages are future work.
+- Uses the host Agent's model and allowance; this does not imply free or offline inference. Long documents require batches, and complex layouts require visual inspection.
+- Structural validation does not replace semantic review or validate the original author's claims. Processing limitations for figure text, equations, and references must be reported.
+- Exports may include source-page images, notes, and revision history. Check contents before sharing; files can be large.
+- Processing and browser workflows were verified on macOS with Python 3.12. Other operating systems, other Agents, and host installation/auto-discovery remain untested. See [validation notes](docs/validation.md).
+
+## Development and contribution
+
+The Skill and implementation live together: `scripts/reader/` contains the backend, `dev/web/` the frontend source, and `assets/reader/` the bundled build. To rebuild, run `npm ci` and `npm run build` in `dev/web/`, then sync the output into `assets/reader/`.
+
+See [AGENTS.md](AGENTS.md) for development conventions and [workflow.md](references/workflow.md) for the processing contract. Reproducible issue reports are welcome; use a minimal public sample where possible.
+
+Code is available under the [MIT License](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md). Paper excerpts in the demo are outside the project's code license.

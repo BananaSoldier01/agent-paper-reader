@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent 文献译读"
+  short_description: "使用当前 Agent 翻译复核英文文献与文章，生成含术语与原文定位的离线双语 HTML"
+  default_prompt: "使用 $agent-paper-reader 将这份英文文献或文章制作成中英对照的离线精读 HTML，整理关键术语并完成复核。"
