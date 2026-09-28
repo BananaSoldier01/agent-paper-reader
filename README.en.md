@@ -66,11 +66,32 @@ The Skill defines the workflow; the Agent provides understanding and translation
 
 ## Get started
 
-### 1. Install the complete Skill folder
+### 1. Send the link to your Agent and ask it to install
 
-**Recommended: [download the v0.1.0 compact Skill package](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip)** and install the extracted `agent-paper-reader/` folder.
+Copy this prompt into your current Agent, which must have local file access and command execution capabilities:
 
-This repository is itself a Skill, with [SKILL.md](SKILL.md) as its entry point. Place the complete contents in a Skill directory supported by your Agent. **Do not copy only SKILL.md.** For a project supporting `.agents/skills`:
+```text
+Please install this Skill for me:
+https://github.com/BananaSoldier01/agent-paper-reader
+
+Read the repository README and SKILL.md first, then install the complete
+Skill using a method supported by the current Agent.
+Confirm the appropriate installation directory and check prerequisites,
+including Python 3.12+. Preserve existing configuration and document data.
+When finished, tell me where it is installed, whether it is ready to use,
+and how to start processing an article.
+```
+
+Your Agent can fetch the repository or release package and check the installation for your environment. **You do not need to download, extract, or locate folders manually first.** Installation methods and permissions vary by host; rely on actual checks to confirm success.
+
+Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. Processing documents also requires the Agent to inspect pages.
+
+<details>
+<summary>Manual installation and directory layout (optional)</summary>
+
+Download the [v0.1.0 compact Skill package](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) and place the complete extracted `agent-paper-reader/` folder in a Skill directory supported by your Agent.
+
+This repository is also a complete Skill, with [SKILL.md](SKILL.md) as its entry point. You can install the full repository contents; **do not copy only SKILL.md**. For a project supporting `.agents/skills`:
 
 ```text
 my-project/
@@ -82,9 +103,9 @@ my-project/
     └── …
 ```
 
-Alternatively, run `python3 dev/package_skill.py` and install the folder inside `dist/agent-paper-reader.zip`. This compact package contains runtime resources only. Discovery paths vary by host; if needed, explicitly ask the Agent to read the installed `SKILL.md`.
+Developers can run `python3 dev/package_skill.py` to generate `dist/agent-paper-reader.zip`. Discovery paths vary by host; if necessary, explicitly ask the Agent to read the installed `SKILL.md`.
 
-Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. The Agent must be able to read/write files, run commands, and inspect pages.
+</details>
 
 ### 2. Ask your Agent
 

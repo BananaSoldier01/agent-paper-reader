@@ -68,13 +68,29 @@
 
 ## 开始使用
 
-### 1. 安装完整 Skill 文件夹
+### 1. 把链接发给 Agent，让它帮你安装
 
-**推荐：[下载 v0.1.0 精简 Skill 安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip)**，解压后将 `agent-paper-reader/` 文件夹放入 Skill 目录。
+复制下面这段话，发给你正在使用、具备本地文件和命令执行能力的 Agent：
 
-本仓库根目录就是 Skill，入口为 [SKILL.md](SKILL.md)。将完整仓库内容放入你的 Agent 支持的 Skill 目录，**不要只复制 SKILL.md**。
+```text
+请帮我安装这个 Skill：
+https://github.com/BananaSoldier01/agent-paper-reader
 
-例如，支持 `.agents/skills` 的项目可以采用：
+先阅读仓库 README 和 SKILL.md，按当前 Agent 支持的方式安装完整 Skill。
+请确认适合当前环境的安装目录，并检查 Python 3.12+ 等运行条件。
+保留已有配置与文献数据，完成后告诉我安装位置、是否可用，以及如何开始处理文章。
+```
+
+Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**不需要先手动下载、解压或查找文件夹。** 不同 Agent 的安装方式与权限要求可能不同；安装是否成功，以实际检查结果为准。
+
+需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。处理文献时，Agent 还需要具备页面查看能力。
+
+<details>
+<summary>手动安装与目录说明（可选）</summary>
+
+下载 [v0.1.0 精简 Skill 安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip)，解压后将完整的 `agent-paper-reader/` 文件夹放入你的 Agent 支持的 Skill 目录。
+
+本仓库根目录本身也是完整 Skill，入口为 [SKILL.md](SKILL.md)。可以安装完整仓库内容，**不要只复制 SKILL.md**。例如，支持 `.agents/skills` 的项目可以采用：
 
 ```text
 你的工作项目/
@@ -86,9 +102,9 @@
     └── …
 ```
 
-也可运行 `python3 dev/package_skill.py`，将生成的 `dist/agent-paper-reader.zip` 解压后安装；这是只包含运行所需文件的精简包。其他 Agent 的发现目录以其自身规则为准，不能自动发现时可明确要求它读取本包的 `SKILL.md`。
+开发者可运行 `python3 dev/package_skill.py` 生成 `dist/agent-paper-reader.zip`。其他 Agent 的发现目录以其自身规则为准；不能自动发现时，可明确要求它读取已安装的 `SKILL.md`。
 
-需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。Agent 需要具备文件读写、命令执行和页面查看能力。
+</details>
 
 ### 2. 把这段话发给 Agent
 
