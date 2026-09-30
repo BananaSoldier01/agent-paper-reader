@@ -1,6 +1,6 @@
 ## 完整流程
 
-1. `python <SKILL_DIR>/scripts/paper_reader.py --workspace <WORKSPACE> import /绝对路径/文献.pdf`（也支持 UTF-8 Markdown）。结果为 JSON，记住 `document_id`。原件复制后按 SHA-256 校验；同一内容重复导入返回同一文档。CLI 导入 Markdown 可复制同目录内的本地图像，网页上传 Markdown 不含其相邻文件，缺图会阻止完成。
+1. `python <SKILL_DIR>/scripts/paper_reader.py --workspace <WORKSPACE> import /绝对路径/文献.pdf`（也支持 UTF-8 Markdown、`.txt`、本地 `.html`/`.htm`、`.docx`、单文件 `.tex`）。结果为 JSON，记住 `document_id`。原件复制后按 SHA-256 校验；同一内容重复导入返回同一文档。CLI 导入 Markdown/HTML 可复制同目录内的本地图像（从不抓取远程 URL）；网页上传不含其相邻文件，缺图会阻止完成。HTML 是本地存档解析，不是站点爬取。TeX 仅处理当前单文件，不展开 `\input`/`\include`，也不编译；`\includegraphics` 记为未嵌入问题。DOCX 提取段落/标题/表格，复杂版式（文本框、页眉页脚、嵌入对象）支持有限。
 2. `python <SKILL_DIR>/scripts/paper_reader.py --workspace <WORKSPACE> show ID` 阅读全篇候选、来源台账和问题。结构调整前查看原文页图，正文阅读顺序由你确认，不能盲信几何提取。合并断行/跨页、整理单双栏、标记标题、图注、公式、图表、参考文献与重复页眉。每个 atom 必须且只能被一个块引用；不要删除来源。改变源文字须给 `source_change` 解释。复杂公式/图表用 `crop ID --page N --bbox x0 top x1 bottom` 保存区域，再在结构块关联返回的 asset。整页备份不能取代正文核对。
 3. 通过 `submit ID payload.json` 提交 `structure`。结构阶段须一次提交完整块清单；翻译或笔记产生后结构冻结，避免破坏稳定锚点。处理不可靠来源，用 `resolve` 说明解决方法或残留读限；扫描页没有 OCR，不能凭空补全文。无法看清的正文须保留未解决状态，不能仅写“忽略”完成任务。
 4. 全文结构读完后提交 `terms`：专业术语英文、中文及解释。没有专业词也须显式提交空列表。概念统一后，`tasks ID --limit 8` 获取待办、目录、术语、相邻上下文与完整所属章节。章节过长时按上下文分批，不只看孤立句。
@@ -21,4 +21,4 @@
 
 ## 非论文文章
 
-报告、技术文档与普通文章使用相同流程。保留原有标题、署名、日期、列表与引用，不补造摘要、方法或参考文献等论文结构。按实际语境解释关键表达；没有专业术语时提交空术语表。网页链接本身不是当前输入格式，需要提供文字型PDF或UTF-8 Markdown文件。
+报告、技术文档与普通文章使用相同流程。保留原有标题、署名、日期、列表与引用，不补造摘要、方法或参考文献等论文结构。按实际语境解释关键表达；没有专业术语时提交空术语表。网页链接本身不是输入格式，需要提供本地文件（PDF / Markdown / txt / HTML 存档 / docx / 单文件 tex）。不抓取 URL，不做 OCR，不支持 EPUB。

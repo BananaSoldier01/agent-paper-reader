@@ -1,8 +1,8 @@
 # 公开 JSON 格式 v1
 
-每份文档位于 `data/<sha256前24位>/`：不可变 `source.pdf/md`、`document.json`、原页 PNG 和区域 PNG。原始来源文件哈希存于 `source_sha256`；每次完整性检查重新计算。文档路径不含任意用户输入。`schema_version: 1`；后续不兼容变更须升级版本，禁止静默迁移。
+每份文档位于 `data/<sha256前24位>/`：不可变 `source.<ext>`（pdf/md/markdown/txt/html/htm/docx/tex）、`document.json`、原页 PNG 和区域 PNG。原始来源文件哈希存于 `source_sha256`；每次完整性检查重新计算。文档路径不含任意用户输入。`schema_version: 1`；本批新增格式只扩展 `location` 字段约定，不改 atoms/blocks 顶层形状，故保持 v1。后续不兼容变更须升级版本，禁止静默迁移。
 
-- `atoms`：不可变的提取来源，`id/text/location`。PDF location 为 1 起算 `page` 和左上坐标系 `bbox: [x0,top,x1,bottom]`，单位 PDF point；Markdown 为码点 `start/end` 和 1 起算 `line_start/line_end`。
+- `atoms`：不可变的提取来源，`id/text/location`。PDF location 为 1 起算 `page` 和左上坐标系 `bbox: [x0,top,x1,bottom]`，单位 PDF point；Markdown / 纯文本 / HTML / TeX 为码点 `start/end` 和 1 起算 `line_start/line_end`（HTML/TeX 尽量映射回原文件；找不到片段时退化为顺序锚点）。DOCX location 为虚拟纯文本拼接视图上的码点 `start/end`，另含 1 起算 `paragraph_index`（按正文段落/表格顺序）。
 - `blocks`：稳定 `id`、`kind`、整理后的 `text`、`source_ids`、`structure_note`、可选 `source_change`、`asset`。正文等文本块引用完整来源；图表保留原图，页眉用 `excluded` 明示原因。允许跨页来源。atom 精度为提取行/片段，定位可逐片段切换。
 - kind：`paragraph/heading/caption/figure/table/formula/reference/code/page/excluded/unclassified`。
 - `translation`：`text` 和 `pairs`。每个 pair 包含 `id/source/target`，后两项为 `[start,end]` 数组的数组，左闭右开、Unicode 码点偏移。一个语义组可跨多个句子或非连续片段。偏移不能重叠、越界或漏掉非空白字符。

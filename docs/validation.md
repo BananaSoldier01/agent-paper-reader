@@ -51,3 +51,12 @@
 适用内容扩大为英文论文、报告、技术文档和普通文章，输入范围仍为文字型PDF和UTF-8 Markdown，不新增URL抓取或其他语言方向。新增自产普通阅读短文的实际处理检查：3块、5组对齐、1项语境词汇，完成翻译与逐句第二轮复核并成功导出。
 
 两篇已有真实论文重新导出，浏览器检测全部为UTF-8，中文可见且页面正文无Unicode替换字符；普通文章同样通过。此结论针对已复现的HTML编码故障，不代表任意PDF字体、扫描件或版式的提取均无误。14项测试重新通过；Skill格式校验通过。待发布源码116个文件，约15.5MB，扫描未发现个人绝对路径、常见令牌或私钥；真实论文数据、完整译稿和运行环境均不在提交范围。
+
+## 输入格式扩展（txt / html / docx / tex）
+
+新增本地导入格式：UTF-8 纯文本 `.txt`、HTML/HTM 存档、Word `.docx`、单文件 LaTeX `.tex`。依赖增加 `beautifulsoup4`、`soupsieve`、`lxml`、`python-docx`（已写入 `scripts/requirements.lock.txt`）。
+
+- pytest：`tests/test_input_formats.py` 覆盖各格式合成夹具（段落切分、脚本剥离与本地/远程图、DOCX 标题段落表格、TeX 注释/`\input`/`\includegraphics`/公式/代码），以及不支持扩展名报错；与既有 PDF/Markdown 回归一并运行。
+- 已知限制：HTML 只解析本地文件、不爬取 URL；DOCX 不保证复杂版式；TeX 不展开 `\input`/`\include`、不做完整编译。
+- 验证状态：合成夹具与全量 pytest 已通过；宿主 Agent 对真实文献的端到端译读尚未按新格式逐一实测，交付时须如实说明。未新增 EPUB、OCR 或 URL 抓取。
+
