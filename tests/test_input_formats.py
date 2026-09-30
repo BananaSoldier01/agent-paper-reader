@@ -122,3 +122,148 @@ def test_htm_alias(data_dir):
     p.write_text('<html><body><p>Hi there.</p></body></html>', encoding='utf-8')
     d = import_document(p)
     assert any('Hi there.' in b['text'] for b in d['blocks'])
+
+
+def test_tex_full_document_wrapper(data_dir):
+    """P1: begin{document}...end{document} must recurse, not collapse to one cleaned paragraph."""
+    p = data_dir / 'wrapped.tex'
+    content = (
+        "\\documentclass{article}\n"
+        "\\title{Measured Speeds}\n"
+        "\\begin{document}\n"
+        "\\section{Results}\n"
+        "The measured speed is $v=\\frac{a}{b}$.\n"
+        "\n"
+        "\\begin{equation}\n"
+        "E=mc^2\n"
+        "\\end{equation}\n"
+        "\n"
+        "\\input{other.tex}\n"
+        "\\includegraphics{fig.png}\n"
+        "\\end{document}\n"
+    )
+    p.write_text(content, encoding='utf-8')
+    d = import_document(p)
+    # Title and/or section heading preserved (not wiped by document-env collapse).
+    assert any(b['kind'] == 'heading' and ('Measured Speeds' in b['text'] or 'Results' in b['text']) for b in d['blocks'])
+    assert any(b['kind'] == 'heading' and b['text'] == 'Results' for b in d['blocks'])
+    # Fraction numerator/denominator not stripped by naive macro cleaning.
+    para = next(b for b in d['blocks'] if 'The measured speed' in b['text'])
+    assert '\\frac' in para['text']
+    assert 'a' in para['text'] and 'b' in para['text']
+    # Must not look like naive macro-strip residue (e.g. v= {t} / empty braces).
+    assert '{t}' not in para['text']
+    assert 'v= {}' not in para['text'].replace(' ', '')
+    assert any(b['kind'] == 'formula' and 'E=mc^2' in b['text'].replace(' ', '') for b in d['blocks'])
+    assert any('not expanded' in i['message'] and 'other.tex' in i['message'] for i in d['issues'])
+    assert any('includegraphics' in i['message'] for i in d['issues'])
+    # Must not collapse the whole document body into a single mangled paragraph.
+    assert len(d['blocks']) >= 3
+
+
+def test_html_div_article_span_body_text(data_dir):
+    """P1: container tags with direct text must yield blocks."""
+    p = data_dir / 'containers.html'
+    p.write_text(
+        '<html><body>'
+        '<div>Visible body text.</div>'
+        '<article>Article body.</article>'
+        '<span>Span text.</span>'
+        '<main>Main landmark text.</main>'
+        '<section><p>Nested paragraph stays a block.</p>Trailing section text.</section>'
+        '</body></html>',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    texts = [b['text'] for b in d['blocks']]
+    assert any('Visible body text.' in t for t in texts)
+    assert any('Article body.' in t for t in texts)
+    assert any('Span text.' in t for t in texts)
+    assert any('Main landmark text.' in t for t in texts)
+    assert any('Nested paragraph stays a block.' in t for t in texts)
+    assert any('Trailing section text.' in t for t in texts)
+
+
+def test_html_image_only_paragraph(data_dir):
+    """P2: <p><img></p> must still produce a figure asset (not gated on paragraph text)."""
+    from PIL import Image as PILImage
+    from reader.store import folder
+    img = data_dir / 'solo.png'
+    PILImage.new('RGB', (4, 4), color=(0, 128, 255)).save(img)
+    p = data_dir / 'img_only.html'
+    p.write_text(
+        '<html><body><p><img src="solo.png" alt="solo"></p></body></html>',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure']
+    assert len(figs) >= 1
+    assert any(b.get('asset') for b in figs)
+    assert any('solo' in b['text'] for b in figs)
+    directory = folder(d['id'])
+    assert any((directory / b['asset']).is_file() for b in figs if b.get('asset'))
+
+
+def test_html_multi_img_paragraph(data_dir):
+    """P2: multiple imgs in one <p> get distinct figure blocks/assets (no overwrite)."""
+    from PIL import Image as PILImage
+    from reader.store import folder
+    a = data_dir / 'a.png'
+    b = data_dir / 'b.png'
+    PILImage.new('RGB', (4, 4), color=(255, 0, 0)).save(a)
+    PILImage.new('RGB', (4, 4), color=(0, 255, 0)).save(b)
+    p = data_dir / 'multi_img.html'
+    p.write_text(
+        '<html><body><p>Two pics<img src="a.png" alt="red"><img src="b.png" alt="green"></p></body></html>',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    assert any(b['kind'] == 'paragraph' and 'Two pics' in b['text'] for b in d['blocks'])
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure' and b.get('asset')]
+    assert len(figs) >= 2
+    assets = [b['asset'] for b in figs]
+    assert len(set(assets)) == len(assets), assets
+    directory = folder(d['id'])
+    for name in assets:
+        assert (directory / name).is_file()
+
+
+def test_docx_heading_caption_math_picture(data_dir):
+    """P2: drawings become figure assets; oMath is detected (text fallback and/or issue), never silent."""
+    from docx import Document
+    from docx.oxml import parse_xml
+    from PIL import Image as PILImage
+    from reader.store import folder
+
+    img = data_dir / 'pic.png'
+    PILImage.new('RGB', (8, 8), color=(200, 100, 50)).save(img)
+
+    p = data_dir / 'rich.docx'
+    doc = Document()
+    doc.add_heading('Docx Math Pic Title', level=1)
+    cap = doc.add_paragraph('Figure caption about the sample.')
+    cap.add_run().add_picture(str(img))
+    only = doc.add_paragraph()
+    only.add_run().add_picture(str(img))
+    omath = parse_xml(
+        '<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+        '<m:oMath><m:r><m:t>E=mc2</m:t></m:r></m:oMath>'
+        '</m:oMathPara>'
+    )
+    mp = doc.add_paragraph()
+    mp._p.append(omath)
+    doc.save(p)
+
+    d = import_document(p)
+    assert any(b['kind'] == 'heading' and 'Docx Math Pic Title' in b['text'] for b in d['blocks'])
+    assert any('caption' in b['text'].lower() or 'Figure caption' in b['text'] for b in d['blocks'])
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure' and b.get('asset')]
+    assert len(figs) >= 1
+    directory = folder(d['id'])
+    assert any((directory / b['asset']).is_file() for b in figs)
+    math_blocks = [b for b in d['blocks'] if b['kind'] == 'formula' or 'E=mc2' in b['text'].replace(' ', '')]
+    omath_issues = [i for i in d['issues'] if 'oMath' in i['message'] or 'equation' in i['message'].lower()]
+    assert math_blocks or omath_issues, 'oMath must not be silently dropped'
+    if math_blocks:
+        assert any('E=mc2' in b['text'].replace(' ', '') for b in math_blocks)
+    assert omath_issues, 'deferred math support must still record an issue when oMath is present'

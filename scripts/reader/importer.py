@@ -127,9 +127,20 @@ def _import_html(path, raw, directory, add, issues):
         'p': 'paragraph', 'blockquote': 'paragraph', 'li': 'paragraph',
         'pre': 'code', 'table': 'table',
     }
+    CONTAINER_TAGS = {
+        'div', 'article', 'section', 'span', 'main', 'aside',
+        'header', 'footer', 'nav', 'body', 'html', 'figure', 'figcaption',
+    }
 
     def cell_text(el):
         return ' '.join(el.stripped_strings)
+
+    def emit_img(img_tag):
+        src = (img_tag.get('src') or '').strip()
+        alt = (img_tag.get('alt') or '').strip() or '[image]'
+        block = add(alt, locate(str(img_tag)), 'figure')
+        if src:
+            _copy_local_image(path, src, directory, block, issues)
 
     def walk(node):
         if isinstance(node, NavigableString):
@@ -152,45 +163,75 @@ def _import_html(path, raw, directory, add, issues):
             else:
                 value = ' '.join(node.stripped_strings)
             if value.strip():
-                block = add(value, locate(value if name != 'pre' else node.get_text()), kind)
-                # Images directly inside this block (e.g. lone figure paragraph).
-                for img in node.find_all('img', recursive=True):
-                    src = (img.get('src') or '').strip()
-                    if src:
-                        _copy_local_image(path, src, directory, block, issues)
+                add(value, locate(value if name != 'pre' else node.get_text()), kind)
+            # Images independent of paragraph text; each gets its own figure block/asset.
+            for img in node.find_all('img', recursive=True):
+                emit_img(img)
             # Do not descend into children already captured as a block unit.
             return
         if name == 'img':
-            src = (node.get('src') or '').strip()
-            alt = (node.get('alt') or '').strip() or '[image]'
-            block = add(alt, locate(str(node)), 'figure')
-            if src:
-                _copy_local_image(path, src, directory, block, issues)
+            emit_img(node)
             return
+
+        # Containers / unknown tags: recurse; collect loose visible text not in block children.
+        buf = []
+
+        def flush_buf():
+            nonlocal buf
+            if not buf:
+                return
+            value = ' '.join(buf).strip()
+            buf = []
+            if value:
+                add(value, locate(value), 'paragraph')
+
         for child in list(node.children):
-            walk(child)
+            if isinstance(child, NavigableString):
+                s = str(child).strip()
+                if s:
+                    buf.append(s)
+                continue
+            if not isinstance(child, Tag):
+                continue
+            cname = (child.name or '').lower()
+            if cname in BLOCK_TAGS or cname == 'img' or cname in CONTAINER_TAGS:
+                flush_buf()
+                walk(child)
+            else:
+                # Inline tag: fold visible text into the loose paragraph buffer.
+                t = ' '.join(child.stripped_strings)
+                if t:
+                    buf.append(t)
+                for img in child.find_all('img', recursive=True):
+                    flush_buf()
+                    emit_img(img)
+        flush_buf()
 
     root = soup.body if soup.body else soup
     walk(root)
 
 
-def _import_docx(path, add, issues):
+def _import_docx(path, directory, add, issues):
     from docx import Document
     from docx.table import Table
     from docx.text.paragraph import Paragraph
     from docx.oxml.ns import qn
+
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 
     document = Document(str(path))
     # Concatenated plaintext view for start/end; paragraph_index is 1-based over body block items.
     pos = 0
     index = 0
 
-    def emit(value, kind):
+    def emit(value, kind, asset=None):
         nonlocal pos, index
         index += 1
         start = pos
         end = start + len(value)
-        add(value, {'start': start, 'end': end, 'paragraph_index': index}, kind)
+        add(value, {'start': start, 'end': end, 'paragraph_index': index}, kind, asset)
         pos = end + 1  # newline separator in the virtual plaintext view
 
     # Walk body in document order (paragraphs and tables).
@@ -199,12 +240,65 @@ def _import_docx(path, add, issues):
         tag = child.tag
         if tag == qn('w:p'):
             para = Paragraph(child, document)
-            text = para.text
-            if not text or not text.strip():
-                continue
+            text = para.text or ''
             style = (para.style.name if para.style is not None else '') or ''
             kind = 'heading' if re.match(r'Heading\s*[1-6]$', style, re.I) or style.lower().startswith('heading') else 'paragraph'
-            emit(text, kind)
+
+            blips = child.findall(f'.//{{{A_NS}}}blip')
+            maths = child.findall(f'.//{{{M_NS}}}oMath')
+
+            if text.strip():
+                emit(text.strip(), kind)
+
+            for blip in blips:
+                rid = blip.get(f'{{{R_NS}}}embed')
+                related = document.part.related_parts
+                if not rid or rid not in related:
+                    issues.append({
+                        'id': f'docx-image-{len(issues)+1}',
+                        'message': 'Word drawing/image not embedded (missing relationship)',
+                        'resolution': None,
+                    })
+                    continue
+                part = related[rid]
+                ext = Path(str(part.partname)).suffix.lower()
+                if ext not in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
+                    ctype = (part.content_type or '').lower()
+                    if 'jpeg' in ctype or 'jpg' in ctype:
+                        ext = '.jpg'
+                    elif 'webp' in ctype:
+                        ext = '.webp'
+                    elif 'gif' in ctype:
+                        ext = '.gif'
+                    else:
+                        ext = '.png'
+                # Allocate figure block first so asset name can use its id.
+                index += 1
+                start = pos
+                label = '[image]'
+                end = start + len(label)
+                block = add(label, {'start': start, 'end': end, 'paragraph_index': index}, 'figure')
+                pos = end + 1
+                name = f"image-{block['id']}{ext}"
+                (directory / name).write_bytes(part.blob)
+                block['asset'] = name
+
+            for math_el in maths:
+                math_text = ''.join(
+                    (t.text or '') for t in math_el.findall(f'.//{{{M_NS}}}t')
+                ).strip()
+                if math_text:
+                    emit(math_text, 'formula')
+                else:
+                    # OMML present but no plain <m:t>; keep a visible stub rather than drop.
+                    emit('[equation]', 'formula')
+                issues.append({
+                    'id': f'docx-omath-{len(issues)+1}',
+                    'message': 'Word equation (oMath) detected; extracted as plain-text/OMML fallback (full math layout not preserved)',
+                    'resolution': None,
+                })
+
+            # Truly empty paragraph (no text, drawings, or math): skip.
         elif tag == qn('w:tbl'):
             table = Table(child, document)
             rows = []
@@ -303,10 +397,12 @@ def _import_tex(raw, add, issues):
     input_cmd = re.compile(r'\\(input|include)\s*\{')
     includegraphics = re.compile(r'\\includegraphics(?:\[[^\]]*\])?\s*\{')
     begin_env = re.compile(r'\\begin\{([a-zA-Z*]+)\}')
+    # Pure containers: recurse into body with the same sectioning/equation/input logic.
+    CONTAINER_ENVS = {'document', 'abstract'}
 
-    def emit_text_run(run_start, run_end):
+    def emit_text_run(src, run_start, run_end):
         nonlocal cursor
-        chunk = text[run_start:run_end]
+        chunk = src[run_start:run_end]
         parts = re.split(r'(\n\s*\n)', chunk)
         for part in parts:
             if re.fullmatch(r'\n\s*\n', part or '') or not part.strip():
@@ -319,134 +415,141 @@ def _import_tex(raw, add, issues):
             loc, cursor = locate_in(original, part.strip(), cursor)
             add(value, loc, 'paragraph')
 
-    pending_start = 0
-    i = 0
-    n = len(text)
-    while i < n:
-        m_env = begin_env.match(text, i)
-        m_sec = sectioning.match(text, i)
-        m_in = input_cmd.match(text, i)
-        m_img = includegraphics.match(text, i)
+    def parse_span(src):
+        nonlocal cursor
+        pending_start = 0
+        i = 0
+        n = len(src)
+        while i < n:
+            m_env = begin_env.match(src, i)
+            m_sec = sectioning.match(src, i)
+            m_in = input_cmd.match(src, i)
+            m_img = includegraphics.match(src, i)
 
-        if m_env:
-            if i > pending_start:
-                emit_text_run(pending_start, i)
-            env = m_env.group(1)
-            end_marker = '\\end{' + env + '}'
-            start_body = m_env.end()
-            end_idx = text.find(end_marker, start_body)
-            if end_idx < 0:
-                body = text[start_body:]
-                next_i = n
-            else:
-                body = text[start_body:end_idx]
-                next_i = end_idx + len(end_marker)
-            body_st = body.strip()
-            if env in ('verbatim', 'lstlisting', 'alltt', 'minted'):
-                loc, cursor = locate_in(original, body_st or env, cursor)
-                add(body_st, loc, 'code')
-            elif env in ('equation', 'equation*', 'align', 'align*', 'displaymath', 'eqnarray', 'eqnarray*'):
-                loc, cursor = locate_in(original, body_st or env, cursor)
-                add(body_st, loc, 'formula')
-            elif env in ('figure', 'table'):
-                cap = re.search(r'\\caption\s*\{', body)
-                if cap:
-                    inner, _ = _tex_brace_arg(body, cap.end() - 1)
-                    if inner:
-                        loc, cursor = locate_in(original, inner.strip(), cursor)
-                        add(_tex_unwrap_inline(inner.strip()), loc, 'caption')
-                for _im in includegraphics.finditer(body):
-                    issues.append({
-                        'id': f'tex-includegraphics-{len(issues)+1}',
-                        'message': 'TeX \\includegraphics not embedded (no LaTeX compilation; asset unresolved)',
-                        'resolution': None,
-                    })
-                cleaned = includegraphics.sub('', body)
-                cleaned = re.sub(r'\\caption\s*\{[^{}]*\}', '', cleaned)
-                cleaned = _tex_unwrap_inline(cleaned)
-                cleaned = re.sub(r'\\[a-zA-Z]+\*?(?:\[[^\]]*\])?', '', cleaned)
-                cleaned = cleaned.strip()
-                if cleaned and not cap:
-                    loc, cursor = locate_in(original, cleaned[:80], cursor)
-                    add(cleaned, loc, 'paragraph')
-            else:
-                cleaned = _tex_unwrap_inline(body)
-                cleaned = re.sub(r'\\[a-zA-Z]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?', ' ', cleaned)
-                cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-                if cleaned:
-                    loc, cursor = locate_in(original, cleaned[:80], cursor)
-                    add(cleaned, loc, 'paragraph')
-            pending_start = next_i
-            i = next_i
-            continue
+            if m_env:
+                if i > pending_start:
+                    emit_text_run(src, pending_start, i)
+                env = m_env.group(1)
+                end_marker = '\\end{' + env + '}'
+                start_body = m_env.end()
+                end_idx = src.find(end_marker, start_body)
+                if end_idx < 0:
+                    body = src[start_body:]
+                    next_i = n
+                else:
+                    body = src[start_body:end_idx]
+                    next_i = end_idx + len(end_marker)
+                body_st = body.strip()
+                if env in CONTAINER_ENVS:
+                    # Recurse: preserve math/sectioning/input/includegraphics inside.
+                    parse_span(body)
+                elif env in ('verbatim', 'lstlisting', 'alltt', 'minted'):
+                    loc, cursor = locate_in(original, body_st or env, cursor)
+                    add(body_st, loc, 'code')
+                elif env in ('equation', 'equation*', 'align', 'align*', 'displaymath', 'eqnarray', 'eqnarray*'):
+                    loc, cursor = locate_in(original, body_st or env, cursor)
+                    add(body_st, loc, 'formula')
+                elif env in ('figure', 'table'):
+                    cap = re.search(r'\\caption\s*\{', body)
+                    if cap:
+                        inner, _ = _tex_brace_arg(body, cap.end() - 1)
+                        if inner:
+                            loc, cursor = locate_in(original, inner.strip(), cursor)
+                            add(_tex_unwrap_inline(inner.strip()), loc, 'caption')
+                    for _im in includegraphics.finditer(body):
+                        issues.append({
+                            'id': f'tex-includegraphics-{len(issues)+1}',
+                            'message': 'TeX \\includegraphics not embedded (no LaTeX compilation; asset unresolved)',
+                            'resolution': None,
+                        })
+                    cleaned = includegraphics.sub('', body)
+                    cleaned = re.sub(r'\\caption\s*\{[^{}]*\}', '', cleaned)
+                    cleaned = _tex_unwrap_inline(cleaned)
+                    cleaned = re.sub(r'\\[a-zA-Z]+\*?(?:\[[^\]]*\])?', '', cleaned)
+                    cleaned = cleaned.strip()
+                    if cleaned and not cap:
+                        loc, cursor = locate_in(original, cleaned[:80], cursor)
+                        add(cleaned, loc, 'paragraph')
+                else:
+                    # Unknown non-container env: soft-clean once (may lose nested macros).
+                    cleaned = _tex_unwrap_inline(body)
+                    cleaned = re.sub(r'\\[a-zA-Z]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?', ' ', cleaned)
+                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                    if cleaned:
+                        loc, cursor = locate_in(original, cleaned[:80], cursor)
+                        add(cleaned, loc, 'paragraph')
+                pending_start = next_i
+                i = next_i
+                continue
 
-        if m_sec:
-            if i > pending_start:
-                emit_text_run(pending_start, i)
-            j = m_sec.end()
-            if j < n and text[j] == '[':
-                depth = 0
-                while j < n:
-                    if text[j] == '\\' and j + 1 < n:
-                        j += 2
-                        continue
-                    if text[j] == '[':
-                        depth += 1
-                    elif text[j] == ']':
-                        depth -= 1
-                        if depth == 0:
-                            j += 1
-                            break
+            if m_sec:
+                if i > pending_start:
+                    emit_text_run(src, pending_start, i)
+                j = m_sec.end()
+                if j < n and src[j] == '[':
+                    depth = 0
+                    while j < n:
+                        if src[j] == '\\' and j + 1 < n:
+                            j += 2
+                            continue
+                        if src[j] == '[':
+                            depth += 1
+                        elif src[j] == ']':
+                            depth -= 1
+                            if depth == 0:
+                                j += 1
+                                break
+                        j += 1
+                while j < n and src[j].isspace():
                     j += 1
-            while j < n and text[j].isspace():
-                j += 1
-            title, after = _tex_brace_arg(text, j)
-            if title is None:
-                nl = text.find('\n', j)
-                if nl < 0:
-                    nl = n
-                title = text[j:nl].strip()
-                after = nl
-            title = _tex_unwrap_inline(title.strip())
-            if title:
-                loc, cursor = locate_in(original, title, cursor)
-                add(title, loc, 'heading')
-            pending_start = after
-            i = after
-            continue
+                title, after = _tex_brace_arg(src, j)
+                if title is None:
+                    nl = src.find('\n', j)
+                    if nl < 0:
+                        nl = n
+                    title = src[j:nl].strip()
+                    after = nl
+                title = _tex_unwrap_inline(title.strip())
+                if title:
+                    loc, cursor = locate_in(original, title, cursor)
+                    add(title, loc, 'heading')
+                pending_start = after
+                i = after
+                continue
 
-        if m_in:
-            if i > pending_start:
-                emit_text_run(pending_start, i)
-            inner, after = _tex_brace_arg(text, m_in.end() - 1)
-            name = (inner or '').strip()
-            issues.append({
-                'id': f'tex-input-{len(issues)+1}',
-                'message': f'TeX \\{m_in.group(1)}{{{name}}} not expanded (single-file import only; multi-file projects unsupported)',
-                'resolution': None,
-            })
-            pending_start = after
-            i = after
-            continue
+            if m_in:
+                if i > pending_start:
+                    emit_text_run(src, pending_start, i)
+                inner, after = _tex_brace_arg(src, m_in.end() - 1)
+                name = (inner or '').strip()
+                issues.append({
+                    'id': f'tex-input-{len(issues)+1}',
+                    'message': f'TeX \\{m_in.group(1)}{{{name}}} not expanded (single-file import only; multi-file projects unsupported)',
+                    'resolution': None,
+                })
+                pending_start = after
+                i = after
+                continue
 
-        if m_img:
-            if i > pending_start:
-                emit_text_run(pending_start, i)
-            inner, after = _tex_brace_arg(text, m_img.end() - 1)
-            issues.append({
-                'id': f'tex-includegraphics-{len(issues)+1}',
-                'message': f'TeX \\includegraphics{{{(inner or "").strip()}}} not embedded (no LaTeX compilation; asset unresolved)',
-                'resolution': None,
-            })
-            pending_start = after
-            i = after
-            continue
+            if m_img:
+                if i > pending_start:
+                    emit_text_run(src, pending_start, i)
+                inner, after = _tex_brace_arg(src, m_img.end() - 1)
+                issues.append({
+                    'id': f'tex-includegraphics-{len(issues)+1}',
+                    'message': f'TeX \\includegraphics{{{(inner or "").strip()}}} not embedded (no LaTeX compilation; asset unresolved)',
+                    'resolution': None,
+                })
+                pending_start = after
+                i = after
+                continue
 
-        i += 1
+            i += 1
 
-    if pending_start < n:
-        emit_text_run(pending_start, n)
+        if pending_start < n:
+            emit_text_run(src, pending_start, n)
 
+    parse_span(text)
 
 
 def _import_pdf(source, add, pages, issues):
@@ -542,7 +645,7 @@ def import_document(path):
         elif extension in ('.html', '.htm'):
             _import_html(path, raw, directory, add, issues)
         elif extension == '.docx':
-            _import_docx(path, add, issues)
+            _import_docx(path, directory, add, issues)
         elif extension == '.tex':
             _import_tex(raw, add, issues)
 
