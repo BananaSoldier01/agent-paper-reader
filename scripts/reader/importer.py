@@ -128,7 +128,7 @@ def _import_html(path, raw, directory, add, issues):
         'pre': 'code', 'table': 'table',
     }
     CONTAINER_TAGS = {
-        'div', 'article', 'section', 'span', 'main', 'aside',
+        'div', 'article', 'section', 'main', 'aside',
         'header', 'footer', 'nav', 'body', 'html', 'figure', 'figcaption',
     }
 
@@ -186,12 +186,14 @@ def _import_html(path, raw, directory, add, issues):
                 add(value, locate(value), 'paragraph')
 
         for child in list(node.children):
-            if isinstance(child, NavigableString):
+            # Comment, Doctype, CData, Declaration, and processing instructions
+            # subclass NavigableString but are not visible body text.
+            if type(child) is NavigableString:
                 s = str(child).strip()
                 if s:
                     buf.append(s)
                 continue
-            if not isinstance(child, Tag):
+            if isinstance(child, NavigableString) or not isinstance(child, Tag):
                 continue
             cname = (child.name or '').lower()
             if cname in BLOCK_TAGS or cname == 'img' or cname in CONTAINER_TAGS:
@@ -234,6 +236,60 @@ def _import_docx(path, directory, add, issues):
         add(value, {'start': start, 'end': end, 'paragraph_index': index}, kind, asset)
         pos = end + 1  # newline separator in the virtual plaintext view
 
+    def emit_embedded(element):
+        """Copy drawings and surface oMath under element (paragraph or table cell)."""
+        nonlocal pos, index
+        blips = element.findall(f'.//{{{A_NS}}}blip')
+        maths = element.findall(f'.//{{{M_NS}}}oMath')
+
+        for blip in blips:
+            rid = blip.get(f'{{{R_NS}}}embed')
+            related = document.part.related_parts
+            if not rid or rid not in related:
+                issues.append({
+                    'id': f'docx-image-{len(issues)+1}',
+                    'message': 'Word drawing/image not embedded (missing relationship)',
+                    'resolution': None,
+                })
+                continue
+            part = related[rid]
+            ext = Path(str(part.partname)).suffix.lower()
+            if ext not in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
+                ctype = (part.content_type or '').lower()
+                if 'jpeg' in ctype or 'jpg' in ctype:
+                    ext = '.jpg'
+                elif 'webp' in ctype:
+                    ext = '.webp'
+                elif 'gif' in ctype:
+                    ext = '.gif'
+                else:
+                    ext = '.png'
+            # Allocate figure block first so asset name can use its id.
+            index += 1
+            start = pos
+            label = '[image]'
+            end = start + len(label)
+            block = add(label, {'start': start, 'end': end, 'paragraph_index': index}, 'figure')
+            pos = end + 1
+            name = f"image-{block['id']}{ext}"
+            (directory / name).write_bytes(part.blob)
+            block['asset'] = name
+
+        for math_el in maths:
+            math_text = ''.join(
+                (t.text or '') for t in math_el.findall(f'.//{{{M_NS}}}t')
+            ).strip()
+            if math_text:
+                emit(math_text, 'formula')
+            else:
+                # OMML present but no plain <m:t>; keep a visible stub rather than drop.
+                emit('[equation]', 'formula')
+            issues.append({
+                'id': f'docx-omath-{len(issues)+1}',
+                'message': 'Word equation (oMath) detected; extracted as plain-text/OMML fallback (full math layout not preserved)',
+                'resolution': None,
+            })
+
     # Walk body in document order (paragraphs and tables).
     body = document.element.body
     for child in body.iterchildren():
@@ -244,60 +300,9 @@ def _import_docx(path, directory, add, issues):
             style = (para.style.name if para.style is not None else '') or ''
             kind = 'heading' if re.match(r'Heading\s*[1-6]$', style, re.I) or style.lower().startswith('heading') else 'paragraph'
 
-            blips = child.findall(f'.//{{{A_NS}}}blip')
-            maths = child.findall(f'.//{{{M_NS}}}oMath')
-
             if text.strip():
                 emit(text.strip(), kind)
-
-            for blip in blips:
-                rid = blip.get(f'{{{R_NS}}}embed')
-                related = document.part.related_parts
-                if not rid or rid not in related:
-                    issues.append({
-                        'id': f'docx-image-{len(issues)+1}',
-                        'message': 'Word drawing/image not embedded (missing relationship)',
-                        'resolution': None,
-                    })
-                    continue
-                part = related[rid]
-                ext = Path(str(part.partname)).suffix.lower()
-                if ext not in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
-                    ctype = (part.content_type or '').lower()
-                    if 'jpeg' in ctype or 'jpg' in ctype:
-                        ext = '.jpg'
-                    elif 'webp' in ctype:
-                        ext = '.webp'
-                    elif 'gif' in ctype:
-                        ext = '.gif'
-                    else:
-                        ext = '.png'
-                # Allocate figure block first so asset name can use its id.
-                index += 1
-                start = pos
-                label = '[image]'
-                end = start + len(label)
-                block = add(label, {'start': start, 'end': end, 'paragraph_index': index}, 'figure')
-                pos = end + 1
-                name = f"image-{block['id']}{ext}"
-                (directory / name).write_bytes(part.blob)
-                block['asset'] = name
-
-            for math_el in maths:
-                math_text = ''.join(
-                    (t.text or '') for t in math_el.findall(f'.//{{{M_NS}}}t')
-                ).strip()
-                if math_text:
-                    emit(math_text, 'formula')
-                else:
-                    # OMML present but no plain <m:t>; keep a visible stub rather than drop.
-                    emit('[equation]', 'formula')
-                issues.append({
-                    'id': f'docx-omath-{len(issues)+1}',
-                    'message': 'Word equation (oMath) detected; extracted as plain-text/OMML fallback (full math layout not preserved)',
-                    'resolution': None,
-                })
-
+            emit_embedded(child)
             # Truly empty paragraph (no text, drawings, or math): skip.
         elif tag == qn('w:tbl'):
             table = Table(child, document)
@@ -311,6 +316,8 @@ def _import_docx(path, directory, add, issues):
             value = '\n'.join(rows).strip()
             if value:
                 emit(value, 'table')
+            # Cell text above does not include drawings or oMath; reuse paragraph detection.
+            emit_embedded(child)
 
     # Headers/footers, text boxes, OLE, tracked changes are out of scope for this batch.
 
@@ -397,8 +404,36 @@ def _import_tex(raw, add, issues):
     input_cmd = re.compile(r'\\(input|include)\s*\{')
     includegraphics = re.compile(r'\\includegraphics(?:\[[^\]]*\])?\s*\{')
     begin_env = re.compile(r'\\begin\{([a-zA-Z*]+)\}')
-    # Pure containers: recurse into body with the same sectioning/equation/input logic.
-    CONTAINER_ENVS = {'document', 'abstract'}
+    # Text containers: recurse with the same sectioning/equation/input logic.
+    # List-like envs nest, so the matching \\end must honor depth (not the first hit).
+    CONTAINER_ENVS = {
+        'document', 'abstract',
+        'itemize', 'enumerate', 'description', 'list', 'trivlist',
+        'center', 'quote', 'quotation', 'verse',
+        'flushleft', 'flushright',
+        'minipage',
+        'titlepage', 'sloppypar',
+    }
+
+    def matching_end(src, env, start_body):
+        begin_tok = '\\begin{' + env + '}'
+        end_tok = '\\end{' + env + '}'
+        depth = 1
+        i = start_body
+        nsrc = len(src)
+        while i < nsrc:
+            if src.startswith(begin_tok, i):
+                depth += 1
+                i += len(begin_tok)
+                continue
+            if src.startswith(end_tok, i):
+                depth -= 1
+                if depth == 0:
+                    return i
+                i += len(end_tok)
+                continue
+            i += 1
+        return -1
 
     def emit_text_run(src, run_start, run_end):
         nonlocal cursor
@@ -432,7 +467,7 @@ def _import_tex(raw, add, issues):
                 env = m_env.group(1)
                 end_marker = '\\end{' + env + '}'
                 start_body = m_env.end()
-                end_idx = src.find(end_marker, start_body)
+                end_idx = matching_end(src, env, start_body)
                 if end_idx < 0:
                     body = src[start_body:]
                     next_i = n
@@ -471,13 +506,20 @@ def _import_tex(raw, add, issues):
                         loc, cursor = locate_in(original, cleaned[:80], cursor)
                         add(cleaned, loc, 'paragraph')
                 else:
-                    # Unknown non-container env: soft-clean once (may lose nested macros).
-                    cleaned = _tex_unwrap_inline(body)
-                    cleaned = re.sub(r'\\[a-zA-Z]+\*?(?:\[[^\]]*\])?(?:\{[^{}]*\})?', ' ', cleaned)
-                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-                    if cleaned:
-                        loc, cursor = locate_in(original, cleaned[:80], cursor)
-                        add(cleaned, loc, 'paragraph')
+                    # Not safe to regex-clean: stripping one brace group turns
+                    # \frac{d}{t} into {t}. Keep the raw fragment and record it.
+                    raw_body = body.strip()
+                    if raw_body:
+                        loc, cursor = locate_in(original, raw_body, cursor)
+                        add(raw_body, loc, 'paragraph')
+                        issues.append({
+                            'id': f'tex-env-{len(issues)+1}',
+                            'message': (
+                                f'TeX environment {{{env}}} not fully interpreted '
+                                '(raw fragment kept; unresolved)'
+                            ),
+                            'resolution': None,
+                        })
                 pending_start = next_i
                 i = next_i
                 continue

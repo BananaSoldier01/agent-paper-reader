@@ -267,3 +267,103 @@ def test_docx_heading_caption_math_picture(data_dir):
     if math_blocks:
         assert any('E=mc2' in b['text'].replace(' ', '') for b in math_blocks)
     assert omath_issues, 'deferred math support must still record an issue when oMath is present'
+
+
+def test_html_comment_and_nonvisible_nodes_not_imported(data_dir):
+    """P2 regression: Comment/Doctype/other non-visible strings are not body text."""
+    p = data_dir / 'comment.html'
+    p.write_text(
+        '<html><body><!-- internal draft: do not publish --><p>Public article.</p></body></html>',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    assert [b['text'] for b in d['blocks']] == ['Public article.']
+
+    other = data_dir / 'nonvisible.html'
+    other.write_text(
+        '<!DOCTYPE html><!-- top secret -->'
+        '<html><body><![CDATA[hidden cdata]]><?pi secret?>'
+        '<p>Visible only.</p></body></html>',
+        encoding='utf-8',
+    )
+    d2 = import_document(other)
+    assert [b['text'] for b in d2['blocks']] == ['Visible only.']
+
+
+def test_html_inline_span_merges_into_one_paragraph(data_dir):
+    p = data_dir / 'span_inline.html'
+    p.write_text(
+        '<html><body><div>The result is <span>not</span> significant.</div></body></html>',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    assert [b['text'] for b in d['blocks']] == ['The result is not significant.']
+
+
+def test_tex_list_environment_preserves_math_and_issues(data_dir):
+    """P1: itemize must recurse so \\frac survives and \\input/\\includegraphics emit issues."""
+    p = data_dir / 'list.tex'
+    p.write_text(
+        "\\begin{itemize}\n"
+        "\\item The speed is $v=\\frac{d}{t}$.\n"
+        "\\input{missing}\n"
+        "\\includegraphics{missing.png}\n"
+        "\\end{itemize}\n"
+        "\n"
+        "\\begin{custombox}\n"
+        "Unparsed $v=\\frac{a}{b}$ stays raw.\n"
+        "\\end{custombox}\n",
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    para = next(b for b in d['blocks'] if 'The speed is' in b['text'])
+    assert r'\frac{d}{t}' in para['text']
+    assert '{t}' not in para['text'].replace(r'\frac{d}{t}', '')
+    assert any(
+        'not expanded' in i['message'] and 'missing' in i['message'] for i in d['issues']
+    )
+    assert any(
+        'includegraphics' in i['message'] and 'missing.png' in i['message'] for i in d['issues']
+    )
+    raw = next(b for b in d['blocks'] if r'\frac{a}{b}' in b['text'])
+    assert 'stays raw' in raw['text']
+    assert any(
+        'custombox' in i['message'] and 'unresolved' in i['message'] and i['resolution'] is None
+        for i in d['issues']
+    )
+
+
+def test_docx_table_cell_image_and_math(data_dir):
+    """P2: table cells keep text plus drawing asset and oMath fallback (never silent)."""
+    from docx import Document
+    from docx.oxml import parse_xml
+    from PIL import Image as PILImage
+    from reader.store import folder
+
+    img = data_dir / 'cell.png'
+    PILImage.new('RGB', (6, 6), color=(1, 2, 3)).save(img)
+
+    p = data_dir / 'cell.docx'
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.cell(0, 0)
+    cell.text = 'Cell content.'
+    para = cell.paragraphs[0]
+    para.add_run().add_picture(str(img))
+    omath = parse_xml(
+        '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+        '<m:r><m:t>E=mc²</m:t></m:r></m:oMath>'
+    )
+    para._p.append(omath)
+    doc.save(p)
+
+    d = import_document(p)
+    assert any(b['kind'] == 'table' and 'Cell content.' in b['text'] for b in d['blocks'])
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure' and b.get('asset')]
+    assert figs, 'table cell image must become a figure asset'
+    directory = folder(d['id'])
+    assert any((directory / b['asset']).is_file() and (directory / b['asset']).stat().st_size > 0 for b in figs)
+    math_blocks = [b for b in d['blocks'] if b['kind'] == 'formula' and 'E=mc²' in b['text']]
+    omath_issues = [i for i in d['issues'] if 'oMath' in i['message'] or 'equation' in i['message'].lower()]
+    assert math_blocks, 'oMath in a table cell needs a plain-text fallback'
+    assert omath_issues, 'oMath in a table cell must record an unresolved issue'
