@@ -771,3 +771,167 @@ def test_tex_unclosed_brace_does_not_hang(data_dir):
     assert any('missing.tex' in i['message'] for i in d['issues'])
     assert any('includegraphics' in i['message'] for i in d['issues'])
 
+
+def _sym_run(font, code):
+    from docx.oxml import parse_xml
+    return parse_xml(
+        '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:sym w:font="{font}" w:char="{code}"/></w:r>'
+    )
+
+
+def test_docx_phantom_show_keeps_visible_base(data_dir):
+    """P1: m:phant is visible unless m:show is 0/false/off. zeroAsc/Desc/Wid are not hide."""
+    from docx import Document
+
+    p = data_dir / 'phant.docx'
+    doc = Document()
+    # Real-like b00060: bar over (u–1), zeroAsc/zeroDesc, no m:show.
+    doc.add_paragraph()._p.append(_omath(
+        '<m:phant><m:phantPr><m:zeroAsc m:val="1"/><m:zeroDesc m:val="1"/></m:phantPr>'
+        '<m:e><m:acc><m:accPr><m:chr m:val="̅"/></m:accPr>'
+        '<m:e><m:r><m:t>u</m:t></m:r></m:e></m:acc>'
+        '<m:r><m:rPr><m:nor/></m:rPr><m:t>–</m:t></m:r>'
+        '<m:r><m:t>1</m:t></m:r></m:e></m:phant>'
+    ))
+    # Real-like b00110: zeroWid phantom still shows C(Φ[q]).
+    doc.add_paragraph()._p.append(_omath(
+        '<m:phant><m:phantPr><m:zeroWid m:val="1"/></m:phantPr><m:e>'
+        '<m:r><m:t>C</m:t></m:r>'
+        '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e>'
+        '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>Φ</m:t></m:r>'
+        '<m:d><m:dPr><m:begChr m:val="["/><m:endChr m:val="]"/></m:dPr>'
+        '<m:e><m:r><m:t>q</m:t></m:r></m:e></m:d>'
+        '</m:e></m:d></m:e></m:phant>'
+    ))
+    # Real-like b00216/217: Vox_g(S_B) with zeroAsc/zeroDesc only.
+    doc.add_paragraph()._p.append(_omath(
+        '<m:phant><m:phantPr><m:zeroAsc m:val="1"/><m:zeroDesc m:val="1"/></m:phantPr><m:e>'
+        '<m:sSub><m:e><m:r><m:rPr><m:nor/></m:rPr><m:t>Vox</m:t></m:r></m:e>'
+        '<m:sub><m:r><m:t>g</m:t></m:r></m:sub></m:sSub>'
+        '<m:d><m:e><m:sSub><m:e><m:r><m:t>S</m:t></m:r></m:e>'
+        '<m:sub><m:r><m:t>B</m:t></m:r></m:sub></m:sSub></m:e></m:d>'
+        '</m:e></m:phant>'
+    ))
+    hidden = doc.add_paragraph()
+    hidden.add_run('keep-visible ')
+    hidden._p.append(_omath(
+        '<m:phant><m:phantPr><m:show m:val="0"/><m:zeroWid m:val="1"/></m:phantPr>'
+        '<m:e><m:r><m:t>AAA</m:t></m:r></m:e></m:phant>'
+    ))
+    hidden.add_run(' tail')
+    off = doc.add_paragraph()
+    off.add_run('still ')
+    off._p.append(_omath(
+        '<m:phant><m:phantPr><m:show m:val="false"/></m:phantPr>'
+        '<m:e><m:r><m:t>HIDDEN</m:t></m:r></m:e></m:phant>'
+        '<m:phant><m:phantPr><m:show m:val="off"/><m:zeroWid m:val="1"/></m:phantPr>'
+        '<m:e><m:r><m:t>OFFHIDDEN</m:t></m:r></m:e></m:phant>'
+    ))
+    shown = doc.add_paragraph()
+    shown._p.append(_omath(
+        '<m:phant><m:phantPr><m:show m:val="1"/></m:phantPr>'
+        '<m:e><m:r><m:t>KEPT</m:t></m:r></m:e></m:phant>'
+        '<m:phant><m:phantPr><m:show m:val="on"/></m:phantPr>'
+        '<m:e><m:r><m:t>KEPT2</m:t></m:r></m:e></m:phant>'
+        '<m:phant><m:phantPr><m:zeroWid m:val="1"/></m:phantPr>'
+        '<m:e><m:r><m:t>WIDTEXT</m:t></m:r></m:e></m:phant>'
+    ))
+    doc.save(p)
+
+    d = import_document(p)
+    texts = [b['text'] for b in d['blocks']]
+    compact = [re.sub(r'\s+', '', t) for t in texts]
+    assert any(r'\bar{u}-1' in t or r'\bar{u}–1' in t for t in compact)
+    phi = next(t for t in compact if 'Phi' in t or 'Φ' in t)
+    assert 'C(' in phi and 'q' in phi
+    assert r'\Phi' in phi or 'Φ' in phi
+    vox = next(t for t in compact if 'Vox' in t)
+    assert 'Vox' in vox and 'g' in vox and 'S' in vox and 'B' in vox
+    blob = '\n'.join(texts)
+    assert 'AAA' not in blob
+    assert 'HIDDEN' not in blob
+    assert 'OFFHIDDEN' not in blob
+    assert 'keep-visible' in blob and 'tail' in blob
+    assert 'still' in blob
+    assert 'KEPT' in blob and 'KEPT2' in blob and 'WIDTEXT' in blob
+    assert not any(i['id'].startswith('docx-omath') for i in d['issues'])
+    assert all(i['resolution'] is None for i in d['issues'])
+
+
+def test_docx_symbol_font_multiply_keeps_scripts(data_dir):
+    """P1: Symbol F0B4 is ×; other known Symbol slots map; unknown font/code is an issue."""
+    from docx import Document
+
+    p = data_dir / 'syms.docx'
+    doc = Document()
+    pack = doc.add_paragraph()
+    pack.add_run('each 4')
+    pack._p.append(_sym_run('Symbol', 'F0B4'))
+    pack.add_run('2 block and 4')
+    pack._p.append(_sym_run('Symbol', 'F0B4'))
+    pack.add_run('2')
+    pack._p.append(_sym_run('Symbol', 'f0b4'))
+    pack.add_run('256 texture')
+    bits = doc.add_paragraph()
+    bits.add_run('128')
+    sup = bits.add_run('2')
+    sup.font.superscript = True
+    bits._p.append(_sym_run('Symbol', 'F0B4'))
+    bits.add_run('8 bits and 83')
+    sup3 = bits.add_run('3')
+    sup3.font.superscript = True
+    bits._p.append(_sym_run('Symbol', 'F0B4'))
+    bits.add_run('3')
+    sup3b = bits.add_run('3')
+    sup3b.font.superscript = True
+    bare = doc.add_paragraph()
+    bare.add_run('n')
+    bare._p.append(_sym_run('Symbol', 'B4'))
+    bare.add_run('m pm ')
+    bare._p.append(_sym_run('Symbol', 'F0B1'))
+    bare.add_run(' inf ')
+    bare._p.append(_sym_run('Symbol', 'F0A5'))
+    unknown = doc.add_paragraph()
+    unknown.add_run('before ')
+    unknown._p.append(_sym_run('Wingdings', 'F0B4'))
+    unknown.add_run(' after ')
+    unknown._p.append(_sym_run('Symbol', 'F0E6'))
+    unknown.add_run(' end')
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.cell(0, 0).paragraphs[0]
+    cell.add_run('276')
+    cell_sup = cell.add_run('2')
+    cell_sup.font.superscript = True
+    cell._p.append(_sym_run('Symbol', 'F0B4'))
+    cell.add_run('35')
+    doc.save(p)
+
+    d = import_document(p)
+    texts = [b['text'] for b in d['blocks']]
+    pack_t = next(t for t in texts if 'texture' in t)
+    assert '4×2' in pack_t
+    assert '4×2×256' in pack_t
+    assert '42' not in pack_t
+    bits_t = next(t for t in texts if 'bits and' in t)
+    assert '128²×8' in bits_t
+    assert '83³×3³' in bits_t
+    assert '1282' not in bits_t and '833' not in bits_t
+    other = next(t for t in texts if t.startswith('n'))
+    assert 'n×m' in other
+    assert '±' in other and '∞' in other
+    unk = next(t for t in texts if 'before' in t)
+    assert '×' not in unk
+    assert '[sym Wingdings F0B4]' in unk
+    assert '[sym Symbol F0E6]' in unk
+    assert 'before' in unk and 'after' in unk and 'end' in unk
+    cell_t = next(t for t in texts if '276' in t)
+    assert '276²×35' in cell_t
+    sym_issues = [i for i in d['issues'] if i['id'].startswith('docx-sym-')]
+    assert len(sym_issues) == 2
+    assert all(i['resolution'] is None for i in sym_issues)
+    blob = '\n'.join(i['message'] for i in sym_issues)
+    assert 'Wingdings' in blob and 'F0B4' in blob
+    assert 'F0E6' in blob
+    assert not any('F0B1' in i['message'] or 'F0A5' in i['message'] for i in sym_issues)
+

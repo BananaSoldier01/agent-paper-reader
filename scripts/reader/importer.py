@@ -241,6 +241,22 @@ def _omml_delim_token(ch, default):
             '⌊': r'\lfloor ', '⌋': r'\rfloor ', '‖': r'\Vert '}.get(ch, ch)
 
 
+def _omml_phant_hidden(el):
+    """Hide a phantom only when m:show is explicitly off.
+
+    ECMA-376 ShowPhantom defaults to visible when m:show is absent. zeroAsc,
+    zeroDesc, and zeroWid change the strut box; they do not hide the base.
+    """
+    pr = _omml_first(el, 'phantPr')
+    show = _omml_first(pr, 'show') if pr is not None else None
+    if show is None:
+        return False
+    val = _xml_attr(show, 'val')
+    if val is None:
+        return False
+    return val.strip().lower() in ('0', 'false', 'off')
+
+
 def _omml_convert(el, flags):
     loc = _xml_local(el.tag)
     if loc in _OMML_PROP:
@@ -248,7 +264,9 @@ def _omml_convert(el, flags):
     if loc == 't':
         return _omml_text_to_latex(el.text or '', flags)
     if loc == 'phant':
-        return ''
+        if _omml_phant_hidden(el):
+            return ''
+        return ''.join(_omml_convert(c, flags) for c in el)
     if loc == 'r':
         text = ''.join((c.text or '') for c in el if _xml_local(c.tag) == 't')
         rPr = _omml_first(el, 'rPr')
@@ -617,6 +635,71 @@ def _import_html(path, raw, directory, add, issues):
     walk(root)
 
 
+# Adobe Symbol encoding byte → Unicode. Word stores these as U+F0xx (or the bare byte).
+# Private-use bracket/arrow extenders are omitted so an unknown slot stays an issue.
+_SYMBOL_FONT_ROWS = """
+20 0020  21 0021  22 2200  23 0023  24 2203  25 0025  26 0026  27 220B
+28 0028  29 0029  2A 2217  2B 002B  2C 002C  2D 2212  2E 002E  2F 002F
+30 0030  31 0031  32 0032  33 0033  34 0034  35 0035  36 0036  37 0037
+38 0038  39 0039  3A 003A  3B 003B  3C 003C  3D 003D  3E 003E  3F 003F
+40 2245  41 0391  42 0392  43 03A7  44 0394  45 0395  46 03A6  47 0393
+48 0397  49 0399  4A 03D1  4B 039A  4C 039B  4D 039C  4E 039D  4F 039F
+50 03A0  51 0398  52 03A1  53 03A3  54 03A4  55 03A5  56 03C2  57 03A9
+58 039E  59 03A8  5A 0396  5B 005B  5C 2234  5D 005D  5E 22A5  5F 005F
+61 03B1  62 03B2  63 03C7  64 03B4  65 03B5  66 03C6  67 03B3  68 03B7
+69 03B9  6A 03D5  6B 03BA  6C 03BB  6D 03BC  6E 03BD  6F 03BF  70 03C0
+71 03B8  72 03C1  73 03C3  74 03C4  75 03C5  76 03D6  77 03C9  78 03BE
+79 03C8  7A 03B6  7B 007B  7C 007C  7D 007D  7E 223C  A0 20AC  A1 03D2
+A2 2032  A3 2264  A4 2044  A5 221E  A6 0192  A7 2663  A8 2666  A9 2665
+AA 2660  AB 2194  AC 2190  AD 2191  AE 2192  AF 2193  B0 00B0  B1 00B1
+B2 2033  B3 2265  B4 00D7  B5 221D  B6 2202  B7 2022  B8 00F7  B9 2260
+BA 2261  BB 2248  BC 2026  BF 21B5  C0 2135  C1 2111  C2 211C  C3 2118
+C4 2297  C5 2295  C6 2205  C7 2229  C8 222A  C9 2283  CA 2287  CB 2284
+CC 2282  CD 2286  CE 2208  CF 2209  D0 2220  D1 2207  D5 220F  D6 221A
+D7 22C5  D8 00AC  D9 2227  DA 2228  DB 21D4  DC 21D0  DD 21D1  DE 21D2
+DF 21D3  E0 25CA  E1 2329  E5 2211  F1 232A  F2 222B  F3 2320  F5 2321
+"""
+
+
+def _symbol_font_table():
+    tokens = _SYMBOL_FONT_ROWS.split()
+    return {int(tokens[i], 16): chr(int(tokens[i + 1], 16)) for i in range(0, len(tokens), 2)}
+
+
+_SYMBOL_FONT = _symbol_font_table()
+
+
+def _symbol_font_byte(code):
+    raw = (code or '').strip()
+    if not re.fullmatch(r'[0-9A-Fa-f]{1,6}', raw):
+        return None
+    value = int(raw, 16)
+    if 0xF000 <= value <= 0xF0FF or value <= 0xFF:
+        return value & 0xFF
+    return None
+
+
+def _word_symbol_text(el, issues):
+    """Map a w:sym, or keep a visible token and an unresolved issue."""
+    font = (_xml_attr(el, 'font') or '').strip()
+    code = (_xml_attr(el, 'char') or '').strip()
+    byte = _symbol_font_byte(code)
+    mapped = _SYMBOL_FONT.get(byte) if font.casefold() == 'symbol' and byte is not None else None
+    if mapped is not None:
+        return mapped
+    evidence = f'[sym {font or "?"} {(code or "?").upper()}]'
+    n = 1 + sum(1 for item in issues if str(item.get('id', '')).startswith('docx-sym-'))
+    issues.append({
+        'id': f'docx-sym-{n}',
+        'message': (
+            f'Word symbol w:sym font "{font}" char "{code}" has no known mapping; '
+            f'kept inline as {evidence}'
+        ),
+        'resolution': None,
+    })
+    return evidence
+
+
 def _import_docx(path, directory, add, issues):
     from docx import Document
     from docx.table import Table
@@ -706,6 +789,8 @@ def _import_docx(path, directory, add, issues):
                 texts.append('\t')
             elif loc == 'br':
                 texts.append('\n')
+            elif loc == 'sym':
+                texts.append(_word_symbol_text(child, issues))
         raw = ''.join(texts)
         if vert in ('superscript', 'subscript'):
             pieces.append(_run_script_text(raw, vert))
