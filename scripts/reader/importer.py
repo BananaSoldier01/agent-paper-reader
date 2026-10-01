@@ -255,15 +255,26 @@ def _omml_convert(el, flags):
         nor = False
         sty = None
         scr = None
+        aln = False
         if rPr is not None:
             nor = _omml_first(rPr, 'nor') is not None
             sty = _xml_attr(_omml_first(rPr, 'sty'), 'val')
             scr = _xml_attr(_omml_first(rPr, 'scr'), 'val')
+            aln = _omml_first(rPr, 'aln') is not None
+        if sty not in (None, '', 'p', 'b', 'i', 'bi'):
+            flags['faithful'] = False
         if scr in _OMML_SCR:
-            return '\\' + _OMML_SCR[scr] + '{' + text + '}'
-        latex = _omml_text_to_latex(text, flags)
-        if (nor or sty == 'p') and re.search(r'[A-Za-z]', text):
-            return r'\mathrm{' + latex + '}'
+            latex = '\\' + _OMML_SCR[scr] + '{' + text + '}'
+        elif sty == 'b':
+            latex = r'\mathbf{' + _omml_text_to_latex(text, flags) + '}'
+        elif sty == 'bi':
+            latex = r'\boldsymbol{' + _omml_text_to_latex(text, flags) + '}'
+        else:
+            latex = _omml_text_to_latex(text, flags)
+            if (nor or sty == 'p') and re.search(r'[A-Za-z]', text):
+                latex = r'\mathrm{' + latex + '}'
+        if aln:
+            latex = '&' + latex
         return latex
     if loc in ('oMath', 'oMathPara', 'e', 'box', 'num', 'den', 'sub', 'sup', 'deg', 'lim', 'fName'):
         return ''.join(_omml_convert(c, flags) for c in el)
@@ -355,7 +366,35 @@ def _omml_convert(el, flags):
         rows = [_omml_convert(c, flags) for c in _omml_all(el, 'e')]
         return r'\begin{aligned}' + r' \\ '.join(rows) + r'\end{aligned}'
     if loc == 'bar':
-        return r'\overline{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e')) + '}'
+        # ECMA-376 default pos is top (overbar). bot is underbar. Anything else is evidence, not a silent success.
+        pos = 'top'
+        barPr = _omml_first(el, 'barPr')
+        if barPr is not None:
+            if barPr.attrib:
+                flags['faithful'] = False
+            for ch in barPr:
+                cl = _xml_local(ch.tag)
+                if cl == 'ctrlPr':
+                    continue
+                if cl == 'pos':
+                    extra = [k.rsplit('}', 1)[-1] for k in ch.attrib if k.rsplit('}', 1)[-1] != 'val']
+                    if extra:
+                        flags['faithful'] = False
+                    raw = _xml_attr(ch, 'val')
+                    val = (raw or 'top').strip().lower()
+                    if val in ('top', 'bot'):
+                        pos = val
+                    else:
+                        flags['faithful'] = False
+                else:
+                    flags['faithful'] = False
+        for ch in el:
+            if _xml_local(ch.tag) not in ('barPr', 'e'):
+                flags['faithful'] = False
+        body = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e'))
+        if pos == 'bot':
+            return r'\underline{' + body + '}'
+        return r'\overline{' + body + '}'
     if loc == 'groupChr':
         return ''.join(_omml_convert(c, flags) for c in el)
     if loc not in _OMML_KNOWN:
@@ -376,7 +415,8 @@ def _omml_snippet(el):
         raw = etree.tostring(el, encoding='unicode')
     except Exception:
         raw = str(el)
-    return re.sub(r'\s+', ' ', raw)[:280]
+    raw = re.sub(r'\sxmlns(?::[A-Za-z0-9_]+)?="[^"]*"', '', raw)
+    return re.sub(r'\s+', ' ', raw).strip()[:280]
 
 
 def _import_html(path, raw, directory, add, issues):
@@ -416,6 +456,15 @@ def _import_html(path, raw, directory, add, issues):
         'h5': 'heading', 'h6': 'heading',
         'p': 'paragraph', 'blockquote': 'paragraph', 'li': 'paragraph',
         'pre': 'code', 'table': 'table',
+    }
+    # Block-level tags. Inline tags (span, em, a, …) must NOT be listed: TeX/LaTeX
+    # logo letter-spacing is done with inline spans and must stay glued.
+    HTML_BLOCK_BOUNDARY = {
+        'address', 'article', 'aside', 'blockquote', 'dd', 'div', 'dl', 'dt',
+        'fieldset', 'figcaption', 'figure', 'footer', 'form',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'li',
+        'main', 'nav', 'ol', 'p', 'pre', 'section', 'table',
+        'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'ul',
     }
     CONTAINER_TAGS = {
         'div', 'article', 'section', 'main', 'aside',
@@ -472,8 +521,18 @@ def _import_html(path, raw, directory, add, issues):
                 mapped = _script_unicode(inner, 'superscript' if name == 'sup' else 'subscript')
                 parts.append(mapped if mapped is not None else inner)
                 return
+
+            def boundary_sep():
+                if parts and parts[-1] and not parts[-1][-1].isspace():
+                    parts.append('\n')
+
             for child in node.children:
-                rec(child)
+                if isinstance(child, Tag) and (child.name or '').lower() in HTML_BLOCK_BOUNDARY:
+                    boundary_sep()
+                    rec(child)
+                    boundary_sep()
+                else:
+                    rec(child)
 
         rec(el)
         text_value = ''.join(parts)
@@ -665,12 +724,26 @@ def _import_docx(path, directory, add, issues):
                 if not faithful:
                     unfaithful.append(child)
             elif loc == 'oMathPara':
-                inner = child.find(f'{{{M_NS}}}oMath')
-                target = inner if inner is not None else child
-                latex, faithful = _omml_to_latex(target)
-                pieces.append(_wrap_math(latex, display=True))
-                if not faithful:
-                    unfaithful.append(target)
+                # Every direct m:oMath sibling is a continuation line, in document order.
+                inners = [c for c in child if _xml_local(c.tag) == 'oMath']
+                if not inners:
+                    latex, faithful = _omml_to_latex(child)
+                    pieces.append(_wrap_math(latex, display=True))
+                    if not faithful:
+                        unfaithful.append(child)
+                else:
+                    lines = []
+                    for inner in inners:
+                        latex, faithful = _omml_to_latex(inner)
+                        lines.append(latex)
+                        if not faithful:
+                            unfaithful.append(inner)
+                    if len(lines) == 1:
+                        joined = lines[0]
+                    else:
+                        # m:aln on a run already inserted '&'. aligned keeps the break and the column.
+                        joined = r'\begin{aligned}' + r' \\ '.join(lines) + r'\end{aligned}'
+                    pieces.append(_wrap_math(joined, display=True))
             elif loc == 'del':
                 continue
             elif loc in WRAPPERS:
@@ -795,32 +868,93 @@ def _tex_expand_verbs(chunk):
     return ''.join(out)
 
 
-def _tex_skip_groups(src, j):
+def _tex_unclosed_end(src, open_at):
+    """Index after the line that opened an unclosed group. Always moves past open_at when it can."""
     n = len(src)
-    while True:
+    if open_at >= n:
+        return n
+    nl = src.find('\n', open_at)
+    end = n if nl < 0 else nl + 1
+    if end <= open_at:
+        end = min(open_at + 1, n)
+    return end
+
+
+def _tex_skip_bracket(src, j):
+    """Skip a `[...]` group starting at j. Returns (index, closed).
+
+    An unclosed group stops at the end of its line and reports closed=False.
+    The index is always greater than j when src[j] is `[`.
+    """
+    n = len(src)
+    if j >= n or src[j] != '[':
+        return j, True
+    start = j
+    depth = 1
+    j += 1
+    while j < n and depth:
+        if src[j] == '\\' and j + 1 < n:
+            j += 2
+            continue
+        if src[j] == '[':
+            depth += 1
+        elif src[j] == ']':
+            depth -= 1
+        j += 1
+    if depth != 0:
+        return _tex_unclosed_end(src, start), False
+    return j, True
+
+
+def _tex_read_brace(src, j):
+    """Read a `{...}` argument at j.
+
+    Returns (inner, index, closed). No brace yields (None, j, True).
+    A closed brace yields the inner text and the index after `}`.
+    An unclosed brace yields the rest of that line (without `{`) and an index
+    past the line, with closed=False. The index always advances when a `{` was seen.
+    """
+    n = len(src)
+    if j >= n or src[j] != '{':
+        return None, j, True
+    inner, nxt = _tex_brace_arg(src, j)
+    if inner is not None and nxt > j:
+        return inner, nxt, True
+    end = _tex_unclosed_end(src, j)
+    nl = src.find('\n', j)
+    rough = src[j + 1:] if nl < 0 else src[j + 1:nl]
+    return rough, end, False
+
+
+def _tex_skip_groups(src, j):
+    """Skip optional `*`, `[...]`, and `{...}` arguments after a command.
+
+    Returns (index, closed). closed is False when a group never terminates.
+    Each iteration moves forward or returns, so an unclosed `{` cannot spin.
+    """
+    n = len(src)
+    origin = j
+    # One more step than any character can justify; a stuck scanner fails instead of hanging.
+    for _ in range(n + 2):
         while j < n and src[j].isspace():
             j += 1
         if j < n and src[j] == '*':
             j += 1
             continue
         if j < n and src[j] == '[':
-            depth = 1
-            j += 1
-            while j < n and depth:
-                if src[j] == '\\' and j + 1 < n:
-                    j += 2
-                    continue
-                if src[j] == '[':
-                    depth += 1
-                elif src[j] == ']':
-                    depth -= 1
-                j += 1
+            j, closed = _tex_skip_bracket(src, j)
+            if not closed:
+                return j, False
             continue
         if j < n and src[j] == '{':
-            _, j = _tex_brace_arg(src, j)
+            _, j, closed = _tex_read_brace(src, j)
+            if not closed:
+                return j, False
             continue
-        break
-    return j
+        return j, True
+    if j <= origin and origin < n:
+        j = origin + 1
+    return min(j, n), False
 
 
 _TEX_SKIP_CMDS = {
@@ -884,7 +1018,7 @@ def _tex_brace_arg(src, start):
     while i < len(src):
         verb_end = _tex_verb_end(src, i)
         if verb_end is not None:
-            i = verb_end
+            i = verb_end if verb_end > i else i + 1
             continue
         if src[i] == '\\' and i + 1 < len(src):
             i += 2
@@ -996,15 +1130,40 @@ def _import_tex(raw, add, issues):
             loc, cursor = locate_in(original, part.strip(), cursor)
             add(value, loc, 'paragraph')
 
+    def note_unclosed(kind, detail):
+        snippet = re.sub(r'\s+', ' ', (detail or '')).strip()[:80]
+        issues.append({
+            'id': f'tex-unclosed-{len(issues)+1}',
+            'message': (
+                f'TeX {kind} has an unclosed argument'
+                + (f' ({snippet})' if snippet else '')
+                + '; skipped through the end of that line (unresolved)'
+            ),
+            'resolution': None,
+        })
+
     def parse_span(src):
         nonlocal cursor
         pending_start = 0
         i = 0
         n = len(src)
+
+        def advance(pos, after):
+            if after > pos:
+                return after
+            return min(pos + 1, n)
+
+        last = -1
         while i < n:
+            # Every branch must move i. A stuck scanner steps one character and continues.
+            if i <= last:
+                i = last + 1
+                if i >= n:
+                    break
+            last = i
             verb_end = _tex_verb_end(src, i)
             if verb_end is not None:
-                i = verb_end
+                i = verb_end if verb_end > i else i + 1
                 continue
 
             m_env = begin_env.match(src, i)
@@ -1025,6 +1184,8 @@ def _import_tex(raw, add, issues):
                 else:
                     body = src[start_body:end_idx]
                     next_i = end_idx + len(end_marker)
+                if next_i <= i:
+                    next_i = min(i + 1, n)
                 body_st = body.strip()
                 if env in CONTAINER_ENVS:
                     parse_span(body)
@@ -1037,7 +1198,9 @@ def _import_tex(raw, add, issues):
                 elif env in ('figure', 'table'):
                     cap = re.search(r'\\caption\s*\{', body)
                     if cap:
-                        inner, _ = _tex_brace_arg(body, cap.end() - 1)
+                        inner, _, cap_closed = _tex_read_brace(body, cap.end() - 1)
+                        if not cap_closed:
+                            note_unclosed('\\caption', inner)
                         if inner:
                             loc, cursor = locate_in(original, inner.strip(), cursor)
                             add(_tex_unwrap_inline(inner.strip()), loc, 'caption')
@@ -1077,32 +1240,29 @@ def _import_tex(raw, add, issues):
                     emit_text_run(src, pending_start, i)
                 j = m_sec.end()
                 if j < n and src[j] == '[':
-                    depth = 0
-                    while j < n:
-                        if src[j] == '\\' and j + 1 < n:
-                            j += 2
-                            continue
-                        if src[j] == '[':
-                            depth += 1
-                        elif src[j] == ']':
-                            depth -= 1
-                            if depth == 0:
-                                j += 1
-                                break
-                        j += 1
+                    j, br_ok = _tex_skip_bracket(src, j)
+                    if not br_ok:
+                        note_unclosed(f'\\{m_sec.group(1)} optional argument', '')
+                        after = advance(i, j)
+                        pending_start = after
+                        i = after
+                        continue
                 while j < n and src[j].isspace():
                     j += 1
-                title, after = _tex_brace_arg(src, j)
+                title, after, closed = _tex_read_brace(src, j)
+                if not closed:
+                    note_unclosed(f'\\{m_sec.group(1)}', title)
                 if title is None:
                     nl = src.find('\n', j)
                     if nl < 0:
                         nl = n
                     title = src[j:nl].strip()
-                    after = nl
-                title = _tex_unwrap_inline(title.strip())
+                    after = nl if nl > i else n
+                title = _tex_unwrap_inline((title or '').strip())
                 if title:
                     loc, cursor = locate_in(original, title, cursor)
                     add(title, loc, 'heading')
+                after = advance(i, after)
                 pending_start = after
                 i = after
                 continue
@@ -1110,13 +1270,16 @@ def _import_tex(raw, add, issues):
             if m_in:
                 if i > pending_start:
                     emit_text_run(src, pending_start, i)
-                inner, after = _tex_brace_arg(src, m_in.end() - 1)
+                inner, after, closed = _tex_read_brace(src, m_in.end() - 1)
+                if not closed:
+                    note_unclosed(f'\\{m_in.group(1)}', inner)
                 name = (inner or '').strip()
                 issues.append({
                     'id': f'tex-input-{len(issues)+1}',
                     'message': f'TeX \\{m_in.group(1)}{{{name}}} not expanded (single-file import only; multi-file projects unsupported)',
                     'resolution': None,
                 })
+                after = advance(i, after)
                 pending_start = after
                 i = after
                 continue
@@ -1124,12 +1287,15 @@ def _import_tex(raw, add, issues):
             if m_img:
                 if i > pending_start:
                     emit_text_run(src, pending_start, i)
-                inner, after = _tex_brace_arg(src, m_img.end() - 1)
+                inner, after, closed = _tex_read_brace(src, m_img.end() - 1)
+                if not closed:
+                    note_unclosed('\\includegraphics', inner)
                 issues.append({
                     'id': f'tex-includegraphics-{len(issues)+1}',
                     'message': f'TeX \\includegraphics{{{(inner or "").strip()}}} not embedded (no LaTeX compilation; asset unresolved)',
                     'resolution': None,
                 })
+                after = advance(i, after)
                 pending_start = after
                 i = after
                 continue
@@ -1138,7 +1304,10 @@ def _import_tex(raw, add, issues):
             if name in _TEX_SKIP_CMDS:
                 if i > pending_start:
                     emit_text_run(src, pending_start, i)
-                after = _tex_skip_groups(src, name_end)
+                after, closed = _tex_skip_groups(src, name_end)
+                if not closed:
+                    note_unclosed(f'\\{name}', '')
+                after = advance(i, after)
                 pending_start = after
                 i = after
                 continue
@@ -1153,25 +1322,24 @@ def _import_tex(raw, add, issues):
                     while j < n and src[j].isspace():
                         j += 1
                 if j < n and src[j] == '[':
-                    depth = 1
-                    j += 1
-                    while j < n and depth:
-                        if src[j] == '\\' and j + 1 < n:
-                            j += 2
-                            continue
-                        if src[j] == '[':
-                            depth += 1
-                        elif src[j] == ']':
-                            depth -= 1
-                        j += 1
+                    j, br_ok = _tex_skip_bracket(src, j)
+                    if not br_ok:
+                        note_unclosed(f'\\{name} optional argument', '')
+                        after = advance(i, j)
+                        pending_start = after
+                        i = after
+                        continue
                     while j < n and src[j].isspace():
                         j += 1
-                inner, after = _tex_brace_arg(src, j)
+                inner, after, closed = _tex_read_brace(src, j)
+                if not closed:
+                    note_unclosed(f'\\{name}', inner)
                 if inner:
                     value = _tex_clean_meta(inner)
                     if value:
                         loc, cursor = locate_in(original, inner.strip(), cursor)
                         add(value, loc, 'paragraph')
+                after = advance(i, after)
                 pending_start = after
                 i = after
                 continue

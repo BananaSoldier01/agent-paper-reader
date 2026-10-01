@@ -14,7 +14,7 @@ description: 将英文文字型 PDF、Markdown、纯文本、本地 HTML、Word 
 - **重新导出**：检查当前版本；需要复核时先完成复核，不重复翻译已完成内容。
 - **管理、修订或笔记**：仅此时读取 [本地文献库](references/library.md) 并按需启动服务。
 
-本版面向英文原文→简体中文，适用于论文、报告、技术文档和普通文章。支持输入：文字型 PDF、UTF-8 Markdown（.md/.markdown）、纯文本（.txt）、本地 HTML/HTM 存档、Word（.docx）、单文件 LaTeX（.tex）。HTML 仅解析本地文件，不抓取远程 URL 或远程图；MathML 只写入一种正文表示。TeX 不展开 \input/\include，也不做完整编译；`\verb` 内命令不触发结构解析；导言区排版宏不进入正文，但 `\title`/`\author` 等元数据会保留。DOCX 普通正文保留行内 oMath 与 run 上下标顺序；文本框、页眉页脚、OLE 等复杂版式支持有限。不支持 EPUB、OCR 扫描件或其他语言方向。用户要求超出范围的格式时说明当前能力，不把临时转换或模型能读懂等同于已支持。无法辨认的正文、乱码和缺图不能标记为已解决。
+本版面向英文原文→简体中文，适用于论文、报告、技术文档和普通文章。支持输入：文字型 PDF、UTF-8 Markdown（.md/.markdown）、纯文本（.txt）、本地 HTML/HTM 存档、Word（.docx）、单文件 LaTeX（.tex）。HTML 仅解析本地文件，不抓取远程 URL 或远程图；MathML 只写入一种正文表示。TeX 不展开 \input/\include，也不做完整编译；`\verb` 内命令不触发结构解析；导言区排版宏不进入正文，但 `\title`/`\author` 等元数据会保留。元数据花括号或可选参数未闭合时记 unresolved issue 并继续，不会停住。DOCX 普通正文保留行内 oMath 与 run 上下标顺序，`oMathPara` 内每个 `oMath` 按顺序保留为续行；`m:bar` 区分上划线与下划线。文本框、页眉页脚、OLE 等复杂版式支持有限。不支持 EPUB、OCR 扫描件或其他语言方向。用户要求超出范围的格式时说明当前能力，不把临时转换或模型能读懂等同于已支持。无法辨认的正文、乱码和缺图不能标记为已解决。
 
 ## 定位运行环境
 

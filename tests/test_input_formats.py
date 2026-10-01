@@ -579,3 +579,195 @@ def test_html_mathml_annotation_and_inline_spacing(data_dir):
     assert any(t == 'Keep inline space.' for t in texts)
     assert any(t == 'Gluedword' for t in texts)
 
+
+def test_docx_omath_para_keeps_every_sibling(data_dir):
+    """P1: every m:oMath in an oMathPara is kept, in order, including alignment breaks."""
+    from docx import Document
+    from docx.oxml import parse_xml
+
+    def para_of(parts):
+        inner = ''.join(f'<m:oMath>{part}</m:oMath>' for part in parts)
+        return parse_xml(f'<m:oMathPara xmlns:m="{M_NS}">{inner}</m:oMathPara>')
+
+    def aligned(ch, num):
+        return (
+            f'<m:r><m:t>{ch}</m:t></m:r>'
+            f'<m:r><m:rPr><m:aln/></m:rPr><m:t>={num}</m:t></m:r>'
+        )
+
+    p = data_dir / 'multi_omath.docx'
+    doc = Document()
+    doc.add_paragraph()._p.append(para_of([aligned('a', '1'), aligned('b', '2'), aligned('c', '3')]))
+    doc.add_paragraph()._p.append(para_of([
+        '<m:r><m:t>a=1</m:t></m:r>',
+        '<m:r><m:t>b=2</m:t></m:r>',
+    ]))
+    doc.save(p)
+
+    d = import_document(p)
+    formulas = [b['text'] for b in d['blocks'] if b['kind'] == 'formula']
+    assert len(formulas) >= 2
+    aligned_line = next(t for t in formulas if 'c' in t and 'aligned' in t)
+    compact = re.sub(r'\s+', '', aligned_line)
+    assert r'\begin{aligned}' in aligned_line and r'\end{aligned}' in aligned_line
+    assert 'a&=1' in compact and 'b&=2' in compact and 'c&=3' in compact
+    assert compact.index('a&=1') < compact.index('b&=2') < compact.index('c&=3')
+    plain = next(t for t in formulas if 'a=1' in re.sub(r'\s+', '', t))
+    plain_c = re.sub(r'\s+', '', plain)
+    assert 'b=2' in plain_c
+    assert plain_c.index('a=1') < plain_c.index('b=2')
+    assert r'\\' in plain
+
+
+def test_docx_bar_pos_and_run_style(data_dir):
+    """P2: m:bar pos top/bot; unsupported bar/style attributes become unresolved issues."""
+    from docx import Document
+
+    p = data_dir / 'bars.docx'
+    doc = Document()
+    doc.add_paragraph()._p.append(_omath(
+        '<m:bar><m:e><m:r><m:t>x</m:t></m:r></m:e></m:bar>'
+    ))
+    doc.add_paragraph()._p.append(_omath(
+        '<m:bar><m:barPr><m:pos m:val="top"/><m:ctrlPr/></m:barPr>'
+        '<m:e><m:r><m:t>y</m:t></m:r></m:e></m:bar>'
+    ))
+    doc.add_paragraph()._p.append(_omath(
+        '<m:bar><m:barPr><m:pos m:val="bot"/><m:ctrlPr/></m:barPr>'
+        '<m:e><m:r><m:t>z</m:t></m:r></m:e></m:bar>'
+    ))
+    doc.add_paragraph()._p.append(_omath(
+        '<m:bar><m:barPr><m:pos m:val="mid"/></m:barPr>'
+        '<m:e><m:r><m:t>q</m:t></m:r></m:e></m:bar>'
+    ))
+    doc.add_paragraph()._p.append(_omath(
+        '<m:bar><m:barPr><m:pos m:val="top"/><m:notARealProp m:val="1"/></m:barPr>'
+        '<m:e><m:r><m:t>w</m:t></m:r></m:e></m:bar>'
+    ))
+    doc.add_paragraph()._p.append(_omath(
+        '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>v</m:t></m:r>'
+    ))
+    doc.add_paragraph()._p.append(_omath(
+        '<m:r><m:rPr><m:sty m:val="bi"/></m:rPr><m:t>u</m:t></m:r>'
+    ))
+    doc.add_paragraph()._p.append(_omath(
+        '<m:r><m:rPr><m:sty m:val="mystery"/></m:rPr><m:t>s</m:t></m:r>'
+    ))
+    doc.save(p)
+
+    d = import_document(p)
+    texts = [b['text'] for b in d['blocks']]
+    compact = [re.sub(r'\s+', '', t) for t in texts]
+    assert any(r'\overline{x}' in t for t in compact)
+    assert any(r'\overline{y}' in t for t in compact)
+    assert any(r'\underline{z}' in t for t in compact)
+    assert any(r'\mathbf{v}' in t for t in compact)
+    assert any(r'\boldsymbol{u}' in t for t in compact)
+    issues = [i for i in d['issues'] if i['id'].startswith('docx-omath')]
+    assert len(issues) == 3
+    assert all(i['resolution'] is None for i in issues)
+    blob = '\n'.join(i['message'] for i in issues)
+    assert 'mid' in blob
+    assert 'notARealProp' in blob
+    assert 'mystery' in blob
+    assert 'm:val="bot"' not in blob
+    assert any('q' in t for t in texts)
+    assert any('w' in t for t in texts)
+
+
+def test_html_block_boundaries_do_not_glue(data_dir):
+    """P2: block edges are separated; inline spaces and TeX/LaTeX logo kerning stay as authored."""
+    p = data_dir / 'blocks.html'
+    p.write_text(
+        '<html><body>'
+        '<blockquote><p>First paragraph.</p><p>Second paragraph.</p></blockquote>'
+        '<ul><li><p>Alpha.</p><p>Beta.</p></li></ul>'
+        '<ul><li>Outer<ul><li>Inner item</li></ul></li></ul>'
+        '<div><p>Left sentence.</p><p>Right sentence.</p></div>'
+        '<p>Keep <em>inline</em> space.</p>'
+        '<p>Glue<span>d</span>word</p>'
+        '<p>From <span class="ltx_TeX_logo" style="letter-spacing:-0.2em;">'
+        'T<span style="position:relative;bottom:-0.2ex;">e</span>X</span> and '
+        '<span class="ltx_LaTeX_logo" style="letter-spacing:-0.2em;">'
+        'L<span>a</span>T<span>e</span>X</span> stay tight.</p>'
+        '</body></html>',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    texts = [b['text'] for b in d['blocks']]
+    blob = '\n'.join(texts)
+    assert 'First paragraph.Second paragraph.' not in blob
+    assert 'Alpha.Beta.' not in blob
+    assert 'OuterInner' not in blob
+    assert 'Left sentence.Right sentence.' not in blob
+    assert 'First paragraph.' in blob and 'Second paragraph.' in blob
+    assert 'Alpha.' in blob and 'Beta.' in blob
+    assert 'Outer' in blob and 'Inner item' in blob
+    assert any(t == 'Left sentence.' for t in texts)
+    assert any(t == 'Right sentence.' for t in texts)
+    assert any(t == 'Keep inline space.' for t in texts)
+    assert any(t == 'Gluedword' for t in texts)
+    logo = next(t for t in texts if 'stay tight' in t)
+    assert 'TeX' in logo and 'T e X' not in logo
+    assert 'LaTeX' in logo and 'L a T e X' not in logo
+
+
+def test_tex_unclosed_brace_does_not_hang(data_dir):
+    """P2: unclosed '{' / '[' in metadata arguments must finish and record an issue."""
+    import signal
+    from reader.importer import _tex_skip_groups
+
+    src = r'\usepackage{foo'
+    brace = src.index('{')
+
+    def _alarm(signum, frame):
+        raise TimeoutError('TeX brace skip hung on an unclosed group')
+
+    old = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(5)
+    try:
+        after, ok = _tex_skip_groups(src, brace)
+        assert ok is False
+        assert after > brace
+        closed = r'\newcommand{\foo}{bar} body'
+        after_c, ok_c = _tex_skip_groups(closed, len(r'\newcommand'))
+        assert ok_c is True
+        assert closed[after_c:] == 'body'
+        opted = r'\usepackage[utf8]{inputenc} NEXT'
+        after_o, ok_o = _tex_skip_groups(opted, opted.index('['))
+        assert ok_o is True
+        assert opted[after_o:] == 'NEXT'
+
+        p = data_dir / 'unclosed.tex'
+        p.write_text(
+            '\\documentclass{article}\n'
+            '\\usepackage{foo\n'
+            '\\title{Kept Title}\n'
+            '\\author{Ada Partial\n'
+            '\\hypersetup{colorlinks\n'
+            '\\newcommand{\\zz\n'
+            '\\includegraphics{fig.png\n'
+            '\\input{missing.tex\n'
+            '\\section[short\n'
+            '\\section{After}\n'
+            'Body survives the unclosed groups.\n',
+            encoding='utf-8',
+        )
+        d = import_document(p)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+    texts = [b['text'] for b in d['blocks']]
+    headings = [b['text'] for b in d['blocks'] if b['kind'] == 'heading']
+    assert 'Kept Title' in headings
+    assert 'After' in headings
+    assert any('Ada Partial' in t for t in texts)
+    assert any('Body survives the unclosed groups.' in t for t in texts)
+    assert not any('colorlinks' in t for t in texts)
+    unclosed = [i for i in d['issues'] if 'unclosed' in i['message'].lower()]
+    assert len(unclosed) >= 4
+    assert all(i['resolution'] is None for i in unclosed)
+    assert any('missing.tex' in i['message'] for i in d['issues'])
+    assert any('includegraphics' in i['message'] for i in d['issues'])
+
