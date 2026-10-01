@@ -56,7 +56,7 @@
 
 新增本地导入格式：UTF-8 纯文本 `.txt`、HTML/HTM 存档、Word `.docx`、单文件 LaTeX `.tex`。依赖增加 `beautifulsoup4`、`soupsieve`、`lxml`、`python-docx`（已写入 `scripts/requirements.lock.txt`）。
 
-- pytest：`tests/test_input_formats.py` 覆盖各格式合成夹具（段落切分、脚本剥离与本地/远程图、DOCX 标题段落表格、TeX 注释/`\input`/`\includegraphics`/公式/代码），以及不支持扩展名报错；与既有 PDF/Markdown 回归一并运行。
-- 已知限制：HTML 只解析本地文件、不爬取 URL；DOCX 不保证复杂版式；TeX 不展开 `\input`/`\include`、不做完整编译。
-- 验证状态：合成夹具与全量 pytest 已通过；宿主 Agent 对真实文献的端到端译读尚未按新格式逐一实测，交付时须如实说明。未新增 EPUB、OCR 或 URL 抓取。
+- pytest：`tests/test_input_formats.py` 覆盖各格式合成夹具（段落切分、脚本剥离与本地/远程图、DOCX 标题段落表格、TeX 注释/`\input`/`\includegraphics`/公式/代码），以及不支持扩展名报错；与既有 PDF/Markdown 回归一并运行。另含 DOCX 行内公式顺序与上下标、TeX `\verb`/完整控制词/导言区元数据、HTML MathML 与词间空格的回归。
+- 已知限制：HTML 只解析本地文件、不爬取 URL、不下载远程图，也不做通用网页正文抽取（导航/页脚仍会进入块，留给结构整理阶段）。DOCX 支持普通正文中的 `oMath` 行内/独立公式（OMML→LaTeX 放入 `$...$`/`$$...$$`，覆盖分式、上下标、括号分组、nary、根式、矩阵等常见结构）以及 run 的 `vertAlign` 上下标；页眉页脚、文本框、OLE、修订和复杂版式仍不保证。无法忠实转换的 oMath 保留原文位置并记 unresolved issue，不猜补公式。TeX 为单文件：不展开 `\input`/`\include`、不编译、不读外部 `.bib`/`.bbl`；`\verb`/`verbatim` 内命令不当结构处理；`\title`/`\author` 等元数据即使在 `document` 外也会保留。
+- 验证状态：合成夹具与全量 pytest 已通过。未新增 EPUB、OCR 或 URL 抓取。
 

@@ -89,6 +89,296 @@ def _import_txt(raw, add):
         pos += len(part)
 
 
+def _xml_local(tag):
+    return tag.rsplit('}', 1)[-1] if tag else ''
+
+
+def _xml_attr(el, name):
+    if el is None:
+        return None
+    suffix = '}' + name
+    for key, value in el.attrib.items():
+        if key == name or key.endswith(suffix):
+            return value
+    return None
+
+
+_SUP_MAP = {
+    '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+    '+': '⁺', '-': '⁻', '−': '⁻', '=': '⁼', '(': '⁽', ')': '⁾', 'n': 'ⁿ', 'i': 'ⁱ',
+}
+_SUB_MAP = {
+    '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+    '+': '₊', '-': '₋', '−': '₋', '=': '₌', '(': '₍', ')': '₎',
+    'a': 'ₐ', 'e': 'ₑ', 'h': 'ₕ', 'i': 'ᵢ', 'j': 'ⱼ', 'k': 'ₖ', 'l': 'ₗ', 'm': 'ₘ',
+    'n': 'ₙ', 'o': 'ₒ', 'p': 'ₚ', 'r': 'ᵣ', 's': 'ₛ', 't': 'ₜ', 'u': 'ᵤ', 'v': 'ᵥ', 'x': 'ₓ',
+}
+
+
+def _script_unicode(text, kind):
+    table = _SUP_MAP if kind == 'superscript' else _SUB_MAP
+    out = []
+    for ch in text:
+        if ch.isspace():
+            out.append(ch)
+            continue
+        mapped = table.get(ch)
+        if mapped is None:
+            return None
+        out.append(mapped)
+    return ''.join(out)
+
+
+def _run_script_text(text, kind):
+    if not text:
+        return ''
+    mapped = _script_unicode(text, kind)
+    if mapped is not None:
+        return mapped
+    inner = text.replace('$', '')
+    if kind == 'superscript':
+        return '$^{' + inner + '}$'
+    return '$_{' + inner + '}$'
+
+
+def _wrap_math(latex, display=False):
+    latex = re.sub(r'\s+', ' ', (latex or '').replace('$', '')).strip()
+    if not latex:
+        return ''
+    if display:
+        return '$$' + latex + '$$'
+    return '$' + latex + '$'
+
+
+def _math_only_text(value):
+    text = (value or '').strip()
+    if not text:
+        return False
+    return re.fullmatch(r'(?:\$\$[\s\S]*?\$\$|\$[^$]+\$|\s)+', text) is not None
+
+
+_OMML_CHARS = {
+    '⋅': r'\cdot ', '·': r'\cdot ', '⋯': r'\cdots ', '…': r'\ldots ',
+    '→': r'\rightarrow ', '←': r'\leftarrow ', '⇒': r'\Rightarrow ', '↔': r'\leftrightarrow ',
+    '≤': r'\leq ', '≥': r'\geq ', '≠': r'\neq ', '≈': r'\approx ', '∈': r'\in ',
+    '∑': r'\sum ', '∏': r'\prod ', '∫': r'\int ', '∞': r'\infty ',
+    '±': r'\pm ', '×': r'\times ', '÷': r'\div ', '−': '-', '–': '-', '—': '-',
+    '′': "'", '″': "''", '∣': r'\mid ', '≤': r'\leq ',
+    'Φ': r'\Phi ', 'φ': r'\phi ', 'ϕ': r'\varphi ', 'α': r'\alpha ', 'β': r'\beta ',
+    'γ': r'\gamma ', 'δ': r'\delta ', 'ε': r'\varepsilon ', 'θ': r'\theta ',
+    'λ': r'\lambda ', 'μ': r'\mu ', 'π': r'\pi ', 'ρ': r'\rho ', 'σ': r'\sigma ',
+    'τ': r'\tau ', 'ω': r'\omega ', 'Γ': r'\Gamma ', 'Δ': r'\Delta ', 'Ω': r'\Omega ',
+    'Σ': r'\Sigma ', 'Λ': r'\Lambda ', 'Θ': r'\Theta ', 'ℓ': r'\ell ',
+    'ℤ': r'\mathbb{Z}', 'ℕ': r'\mathbb{N}', 'ℝ': r'\mathbb{R}',
+}
+_OMML_ACCENT = {
+    '\u0305': r'\bar', '̅': r'\bar', '̂': r'\hat', '˜': r'\tilde', '̃': r'\tilde',
+    '̇': r'\dot', '̈': r'\ddot', '⃗': r'\vec', '̆': r'\breve', '̌': r'\check',
+    '́': r'\acute', '̀': r'\grave',
+}
+_OMML_NARY = {
+    '∑': r'\sum', '∏': r'\prod', '∫': r'\int', '∮': r'\oint',
+    '⋃': r'\bigcup', '⋂': r'\bigcap', '⋀': r'\bigwedge', '⋁': r'\bigvee',
+}
+_OMML_FUNCS = {
+    'sin', 'cos', 'tan', 'log', 'ln', 'exp', 'det', 'ker', 'dim', 'min', 'max',
+    'sup', 'inf', 'lim', 'Pr', 'gcd', 'hom', 'arg',
+}
+_OMML_SCR = {'double-struck': 'mathbb', 'fraktur': 'mathfrak', 'script': 'mathcal'}
+_OMML_PROP = {
+    'ctrlPr', 'rPr', 'dPr', 'fPr', 'naryPr', 'accPr', 'funcPr', 'radPr', 'boxPr',
+    'phantPr', 'sSubPr', 'sSupPr', 'sSubSupPr', 'sPrePr', 'limLowPr', 'limUppPr',
+    'eqArrPr', 'mPr', 'mcPr', 'argPr', 'argSz', 'aln', 'chr', 'begChr', 'endChr',
+    'sepChr', 'count', 'show', 'zeroAsc', 'zeroDesc', 'zeroWid', 'degHide',
+    'supHide', 'limLoc', 'cGp', 'cGpRule', 'mcJc', 'mcs', 'mc', 'lit', 'sty',
+    'scr', 'nor',
+}
+_OMML_KNOWN = {
+    'oMath', 'oMathPara', 'r', 't', 'e', 'sSub', 'sSup', 'sSubSup', 'sPre',
+    'f', 'num', 'den', 'd', 'nary', 'sub', 'sup', 'acc', 'func', 'fName',
+    'rad', 'deg', 'box', 'phant', 'limLow', 'limUpp', 'lim', 'm', 'mr',
+    'groupChr', 'bar', 'eqArr',
+}
+
+
+def _omml_first(el, name):
+    for child in el:
+        if _xml_local(child.tag) == name:
+            return child
+    return None
+
+
+def _omml_all(el, name):
+    return [child for child in el if _xml_local(child.tag) == name]
+
+
+def _omml_text_to_latex(text, flags):
+    out = []
+    for ch in text or '':
+        if ch in _OMML_CHARS:
+            out.append(_OMML_CHARS[ch])
+            continue
+        if ch in '\\{}#$%&_':
+            out.append('\\' + ch)
+            continue
+        if ch == '~':
+            out.append(r'\sim ')
+            continue
+        if ch == '^':
+            out.append(r'\hat{}')
+            flags['faithful'] = False
+            continue
+        out.append(ch)
+    return ''.join(out)
+
+
+def _omml_delim_token(ch, default):
+    if ch is None:
+        return default
+    if ch == '':
+        return ''
+    return {'{': r'\{', '}': r'\}', '⟨': r'\langle ', '⟩': r'\rangle ',
+            '⌊': r'\lfloor ', '⌋': r'\rfloor ', '‖': r'\Vert '}.get(ch, ch)
+
+
+def _omml_convert(el, flags):
+    loc = _xml_local(el.tag)
+    if loc in _OMML_PROP:
+        return ''
+    if loc == 't':
+        return _omml_text_to_latex(el.text or '', flags)
+    if loc == 'phant':
+        return ''
+    if loc == 'r':
+        text = ''.join((c.text or '') for c in el if _xml_local(c.tag) == 't')
+        rPr = _omml_first(el, 'rPr')
+        nor = False
+        sty = None
+        scr = None
+        if rPr is not None:
+            nor = _omml_first(rPr, 'nor') is not None
+            sty = _xml_attr(_omml_first(rPr, 'sty'), 'val')
+            scr = _xml_attr(_omml_first(rPr, 'scr'), 'val')
+        if scr in _OMML_SCR:
+            return '\\' + _OMML_SCR[scr] + '{' + text + '}'
+        latex = _omml_text_to_latex(text, flags)
+        if (nor or sty == 'p') and re.search(r'[A-Za-z]', text):
+            return r'\mathrm{' + latex + '}'
+        return latex
+    if loc in ('oMath', 'oMathPara', 'e', 'box', 'num', 'den', 'sub', 'sup', 'deg', 'lim', 'fName'):
+        return ''.join(_omml_convert(c, flags) for c in el)
+    if loc == 'sSub':
+        return '{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e')) + '}_{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sub')) + '}'
+    if loc == 'sSup':
+        return '{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e')) + '}^{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sup')) + '}'
+    if loc == 'sSubSup':
+        return ('{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e')) + '}_{'
+                + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sub')) + '}^{'
+                + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sup')) + '}')
+    if loc == 'sPre':
+        return ('{}_{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sub')) + '}^{'
+                + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sup')) + '}{'
+                + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e')) + '}')
+    if loc == 'f':
+        return (r'\frac{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'num')) + '}{'
+                + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'den')) + '}')
+    if loc == 'd':
+        dPr = _omml_first(el, 'dPr')
+        beg, end, sep = '(', ')', ','
+        if dPr is not None:
+            if _omml_first(dPr, 'begChr') is not None:
+                beg = _xml_attr(_omml_first(dPr, 'begChr'), 'val') or ''
+            if _omml_first(dPr, 'endChr') is not None:
+                end = _xml_attr(_omml_first(dPr, 'endChr'), 'val') or ''
+            if _omml_first(dPr, 'sepChr') is not None:
+                sep = _xml_attr(_omml_first(dPr, 'sepChr'), 'val')
+                if sep is None:
+                    sep = ','
+        parts = [_omml_convert(c, flags) for c in _omml_all(el, 'e')]
+        sep_l = _omml_text_to_latex(sep, flags) if sep else ','
+        return _omml_delim_token(beg, '(') + sep_l.join(parts) + _omml_delim_token(end, ')')
+    if loc == 'nary':
+        naryPr = _omml_first(el, 'naryPr')
+        chr_v = '∑'
+        hide_sup = False
+        if naryPr is not None:
+            chr_v = _xml_attr(_omml_first(naryPr, 'chr'), 'val') or chr_v
+            hide_sup = _xml_attr(_omml_first(naryPr, 'supHide'), 'val') in ('1', 'on', 'true')
+        op = _OMML_NARY.get(chr_v, _omml_text_to_latex(chr_v, flags)).strip()
+        sub = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sub'))
+        sup = '' if hide_sup else ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'sup'))
+        body = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e'))
+        if sub:
+            op += '_{' + sub + '}'
+        if sup:
+            op += '^{' + sup + '}'
+        return op + ' ' + body
+    if loc == 'acc':
+        accPr = _omml_first(el, 'accPr')
+        chr_v = _xml_attr(_omml_first(accPr, 'chr'), 'val') if accPr is not None else None
+        cmd = _OMML_ACCENT.get(chr_v or '', r'\hat')
+        return cmd + '{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e')) + '}'
+    if loc == 'func':
+        name = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'fName')).strip()
+        arg = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e'))
+        plain = re.sub(r'\\mathrm\{([^{}]+)\}', r'\1', name).strip()
+        if plain in _OMML_FUNCS:
+            return '\\' + plain + ' ' + arg
+        return r'\operatorname{' + plain + '}' + arg
+    if loc == 'rad':
+        radPr = _omml_first(el, 'radPr')
+        hide_deg = False
+        if radPr is not None:
+            hide_deg = _xml_attr(_omml_first(radPr, 'degHide'), 'val') in ('1', 'on', 'true')
+        deg = '' if hide_deg else ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'deg'))
+        body = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e'))
+        if deg:
+            return r'\sqrt[' + deg + ']{' + body + '}'
+        return r'\sqrt{' + body + '}'
+    if loc == 'limLow':
+        base = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e'))
+        lim = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'lim'))
+        plain = re.sub(r'\\mathrm\{([^{}]+)\}', r'\1', base).strip()
+        if plain in _OMML_FUNCS:
+            return '\\' + plain + '_{' + lim + '}'
+        return r'\underset{' + lim + '}{' + base + '}'
+    if loc == 'limUpp':
+        base = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e'))
+        lim = ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'lim'))
+        return r'\overset{' + lim + '}{' + base + '}'
+    if loc == 'm':
+        rows = []
+        for mr in _omml_all(el, 'mr'):
+            rows.append(' & '.join(_omml_convert(c, flags) for c in _omml_all(mr, 'e')))
+        return r'\begin{matrix}' + r' \\ '.join(rows) + r'\end{matrix}'
+    if loc == 'eqArr':
+        rows = [_omml_convert(c, flags) for c in _omml_all(el, 'e')]
+        return r'\begin{aligned}' + r' \\ '.join(rows) + r'\end{aligned}'
+    if loc == 'bar':
+        return r'\overline{' + ''.join(_omml_convert(c, flags) for c in _omml_all(el, 'e')) + '}'
+    if loc == 'groupChr':
+        return ''.join(_omml_convert(c, flags) for c in el)
+    if loc not in _OMML_KNOWN:
+        flags['faithful'] = False
+        return ''.join(_omml_convert(c, flags) for c in el)
+    return ''.join(_omml_convert(c, flags) for c in el)
+
+
+def _omml_to_latex(el):
+    flags = {'faithful': True}
+    latex = _omml_convert(el, flags)
+    return latex.strip(), flags['faithful']
+
+
+def _omml_snippet(el):
+    try:
+        from lxml import etree
+        raw = etree.tostring(el, encoding='unicode')
+    except Exception:
+        raw = str(el)
+    return re.sub(r'\s+', ' ', raw)[:280]
+
+
 def _import_html(path, raw, directory, add, issues):
     from bs4 import BeautifulSoup, NavigableString, Tag
 
@@ -132,8 +422,64 @@ def _import_html(path, raw, directory, add, issues):
         'header', 'footer', 'nav', 'body', 'html', 'figure', 'figcaption',
     }
 
-    def cell_text(el):
-        return ' '.join(el.stripped_strings)
+    def math_text(math_el):
+        alt = (math_el.get('alttext') or math_el.get('alt') or '').strip()
+        display = (math_el.get('display') or '').lower() == 'block'
+        if alt:
+            if '\\' in alt or any(ch in alt for ch in '^_{}'):
+                inner = alt.strip().strip('$')
+                wrap = '$$' if display else '$'
+                return wrap + inner + wrap
+            return alt
+        vis = []
+
+        def rec(node):
+            if type(node) is NavigableString:
+                vis.append(str(node))
+                return
+            if not isinstance(node, Tag):
+                return
+            if (node.name or '').lower() in ('annotation', 'annotation-xml'):
+                return
+            for child in node.children:
+                rec(child)
+
+        rec(math_el)
+        return re.sub(r'\s+', '', ''.join(vis))
+
+    def visible_text(el, collapse=True):
+        parts = []
+
+        def rec(node):
+            if type(node) is NavigableString:
+                parts.append(str(node))
+                return
+            if not isinstance(node, Tag):
+                return
+            name = (node.name or '').lower()
+            if name in ('script', 'style', 'noscript', 'annotation', 'annotation-xml'):
+                return
+            if name == 'br':
+                parts.append('\n')
+                return
+            if name == 'math':
+                parts.append(math_text(node))
+                return
+            if name == 'img':
+                return
+            if name in ('sup', 'sub'):
+                inner = visible_text(node, collapse=False)
+                mapped = _script_unicode(inner, 'superscript' if name == 'sup' else 'subscript')
+                parts.append(mapped if mapped is not None else inner)
+                return
+            for child in node.children:
+                rec(child)
+
+        rec(el)
+        text_value = ''.join(parts)
+        if collapse:
+            return re.sub(r'[ \t\r\n\f\v]+', ' ', text_value).strip()
+        return text_value
 
     def emit_img(img_tag):
         src = (img_tag.get('src') or '').strip()
@@ -153,45 +499,43 @@ def _import_html(path, raw, directory, add, issues):
             if name == 'table':
                 rows = []
                 for tr in node.find_all('tr'):
-                    cells = [cell_text(td) for td in tr.find_all(['td', 'th'])]
+                    cells = [visible_text(td) for td in tr.find_all(['td', 'th'])]
                     rows.append(' | '.join(cells))
                 value = '\n'.join(rows).strip()
             elif name == 'pre':
                 value = node.get_text()
-                # Prefer inner text without outer whitespace-only padding extremes.
                 value = value.strip('\n')
             else:
-                value = ' '.join(node.stripped_strings)
+                value = visible_text(node)
             if value.strip():
                 add(value, locate(value if name != 'pre' else node.get_text()), kind)
-            # Images independent of paragraph text; each gets its own figure block/asset.
             for img in node.find_all('img', recursive=True):
                 emit_img(img)
-            # Do not descend into children already captured as a block unit.
             return
         if name == 'img':
             emit_img(node)
             return
+        if name == 'math':
+            value = math_text(node)
+            if value.strip():
+                kind = 'formula' if (node.get('display') or '').lower() == 'block' or value.startswith('$$') else 'paragraph'
+                add(value, locate(value), kind)
+            return
 
-        # Containers / unknown tags: recurse; collect loose visible text not in block children.
         buf = []
 
         def flush_buf():
             nonlocal buf
             if not buf:
                 return
-            value = ' '.join(buf).strip()
+            value = re.sub(r'[ \t\r\n\f\v]+', ' ', ''.join(buf)).strip()
             buf = []
             if value:
                 add(value, locate(value), 'paragraph')
 
         for child in list(node.children):
-            # Comment, Doctype, CData, Declaration, and processing instructions
-            # subclass NavigableString but are not visible body text.
             if type(child) is NavigableString:
-                s = str(child).strip()
-                if s:
-                    buf.append(s)
+                buf.append(str(child))
                 continue
             if isinstance(child, NavigableString) or not isinstance(child, Tag):
                 continue
@@ -199,9 +543,10 @@ def _import_html(path, raw, directory, add, issues):
             if cname in BLOCK_TAGS or cname == 'img' or cname in CONTAINER_TAGS:
                 flush_buf()
                 walk(child)
+            elif cname == 'math':
+                buf.append(math_text(child))
             else:
-                # Inline tag: fold visible text into the loose paragraph buffer.
-                t = ' '.join(child.stripped_strings)
+                t = visible_text(child, collapse=False)
                 if t:
                     buf.append(t)
                 for img in child.find_all('img', recursive=True):
@@ -222,9 +567,13 @@ def _import_docx(path, directory, add, issues):
     A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
     R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
     M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+    W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+    WRAPPERS = {
+        'hyperlink', 'sdt', 'sdtContent', 'smartTag', 'ins', 'customXml',
+        'fldSimple', 'ruby', 'rt', 'rubyBase',
+    }
 
     document = Document(str(path))
-    # Concatenated plaintext view for start/end; paragraph_index is 1-based over body block items.
     pos = 0
     index = 0
 
@@ -233,19 +582,19 @@ def _import_docx(path, directory, add, issues):
         index += 1
         start = pos
         end = start + len(value)
-        add(value, {'start': start, 'end': end, 'paragraph_index': index}, kind, asset)
-        pos = end + 1  # newline separator in the virtual plaintext view
+        block = add(value, {'start': start, 'end': end, 'paragraph_index': index}, kind, asset)
+        pos = end + 1
+        return block
 
-    def emit_embedded(element):
-        """Copy drawings and surface oMath under element (paragraph or table cell)."""
-        nonlocal pos, index
-        blips = element.findall(f'.//{{{A_NS}}}blip')
-        maths = element.findall(f'.//{{{M_NS}}}oMath')
-
+    def emit_blips(blips):
+        seen = set()
+        related = document.part.related_parts
         for blip in blips:
             rid = blip.get(f'{{{R_NS}}}embed')
-            related = document.part.related_parts
-            if not rid or rid not in related:
+            if not rid or rid in seen:
+                continue
+            seen.add(rid)
+            if rid not in related:
                 issues.append({
                     'id': f'docx-image-{len(issues)+1}',
                     'message': 'Word drawing/image not embedded (missing relationship)',
@@ -264,70 +613,253 @@ def _import_docx(path, directory, add, issues):
                     ext = '.gif'
                 else:
                     ext = '.png'
-            # Allocate figure block first so asset name can use its id.
-            index += 1
-            start = pos
             label = '[image]'
-            end = start + len(label)
-            block = add(label, {'start': start, 'end': end, 'paragraph_index': index}, 'figure')
-            pos = end + 1
+            block = emit(label, 'figure')
             name = f"image-{block['id']}{ext}"
             (directory / name).write_bytes(part.blob)
             block['asset'] = name
 
-        for math_el in maths:
-            math_text = ''.join(
-                (t.text or '') for t in math_el.findall(f'.//{{{M_NS}}}t')
-            ).strip()
-            if math_text:
-                emit(math_text, 'formula')
-            else:
-                # OMML present but no plain <m:t>; keep a visible stub rather than drop.
-                emit('[equation]', 'formula')
-            issues.append({
-                'id': f'docx-omath-{len(issues)+1}',
-                'message': 'Word equation (oMath) detected; extracted as plain-text/OMML fallback (full math layout not preserved)',
-                'resolution': None,
-            })
+    def record_unfaithful(math_el):
+        issues.append({
+            'id': f'docx-omath-{len(issues)+1}',
+            'message': (
+                'Word equation (oMath) has unsupported constructs; '
+                'best-effort math kept in sentence order with unresolved OMML evidence: '
+                + _omml_snippet(math_el)
+            ),
+            'resolution': None,
+        })
 
-    # Walk body in document order (paragraphs and tables).
+    def handle_run(run_el, pieces, blips):
+        blips.extend(run_el.findall(f'.//{{{A_NS}}}blip'))
+        vert = None
+        rPr = run_el.find(f'{{{W_NS}}}rPr')
+        if rPr is not None:
+            va = rPr.find(f'{{{W_NS}}}vertAlign')
+            if va is not None:
+                vert = _xml_attr(va, 'val')
+        texts = []
+        for child in run_el:
+            loc = _xml_local(child.tag)
+            if loc == 't':
+                texts.append(child.text or '')
+            elif loc == 'tab':
+                texts.append('\t')
+            elif loc == 'br':
+                texts.append('\n')
+        raw = ''.join(texts)
+        if vert in ('superscript', 'subscript'):
+            pieces.append(_run_script_text(raw, vert))
+        else:
+            pieces.append(raw)
+
+    def walk_inlines(el, pieces, blips, unfaithful):
+        for child in el.iterchildren():
+            loc = _xml_local(child.tag)
+            ns = child.tag.rsplit('}', 1)[0][1:] if '}' in child.tag else ''
+            if loc == 'r' and ns == W_NS:
+                handle_run(child, pieces, blips)
+            elif loc == 'oMath':
+                latex, faithful = _omml_to_latex(child)
+                pieces.append(_wrap_math(latex, display=False))
+                if not faithful:
+                    unfaithful.append(child)
+            elif loc == 'oMathPara':
+                inner = child.find(f'{{{M_NS}}}oMath')
+                target = inner if inner is not None else child
+                latex, faithful = _omml_to_latex(target)
+                pieces.append(_wrap_math(latex, display=True))
+                if not faithful:
+                    unfaithful.append(target)
+            elif loc == 'del':
+                continue
+            elif loc in WRAPPERS:
+                walk_inlines(child, pieces, blips, unfaithful)
+            elif loc in ('drawing', 'pict', 'object'):
+                blips.extend(child.findall(f'.//{{{A_NS}}}blip'))
+            else:
+                if loc in ('pPr', 'bookmarkStart', 'bookmarkEnd', 'proofErr', 'commentRangeStart',
+                           'commentRangeEnd', 'commentReference'):
+                    continue
+                walk_inlines(child, pieces, blips, unfaithful)
+
+    def paragraph_content(p_el):
+        pieces, blips, unfaithful = [], [], []
+        walk_inlines(p_el, pieces, blips, unfaithful)
+        value = ''.join(pieces)
+        value = re.sub(r'[ \t]+\n', '\n', value).strip()
+        return value, blips, unfaithful
+
     body = document.element.body
     for child in body.iterchildren():
         tag = child.tag
         if tag == qn('w:p'):
             para = Paragraph(child, document)
-            text = para.text or ''
             style = (para.style.name if para.style is not None else '') or ''
-            kind = 'heading' if re.match(r'Heading\s*[1-6]$', style, re.I) or style.lower().startswith('heading') else 'paragraph'
-
-            if text.strip():
-                emit(text.strip(), kind)
-            emit_embedded(child)
-            # Truly empty paragraph (no text, drawings, or math): skip.
+            heading = bool(re.match(r'Heading\s*[1-6]$', style, re.I) or style.lower().startswith('heading'))
+            value, blips, unfaithful = paragraph_content(child)
+            if value:
+                kind = 'heading' if heading else ('formula' if _math_only_text(value) else 'paragraph')
+                emit(value, kind)
+            for math_el in unfaithful:
+                record_unfaithful(math_el)
+            emit_blips(blips)
         elif tag == qn('w:tbl'):
             table = Table(child, document)
             rows = []
-            for row in table.rows:
+            table_unfaithful = []
+            try:
+                row_iter = table.rows
+            except Exception:
+                row_iter = []
+            for row in row_iter:
+                cells = []
                 try:
-                    cells = [c.text.strip() for c in row.cells]
+                    cell_iter = row.cells
                 except Exception:
-                    cells = []
+                    cell_iter = []
+                for cell in cell_iter:
+                    cell_parts = []
+                    for para in cell.paragraphs:
+                        value, _, unfaithful = paragraph_content(para._p)
+                        if value:
+                            cell_parts.append(value)
+                        table_unfaithful.extend(unfaithful)
+                    cells.append(' '.join(cell_parts).strip())
                 rows.append(' | '.join(cells))
             value = '\n'.join(rows).strip()
             if value:
                 emit(value, 'table')
-            # Cell text above does not include drawings or oMath; reuse paragraph detection.
-            emit_embedded(child)
+            for math_el in table_unfaithful:
+                record_unfaithful(math_el)
+            emit_blips(child.findall(f'.//{{{A_NS}}}blip'))
 
     # Headers/footers, text boxes, OLE, tracked changes are out of scope for this batch.
 
 
+def _tex_control_word(src, i):
+    if i >= len(src) or src[i] != '\\':
+        return None, i
+    j = i + 1
+    if j < len(src) and src[j].isalpha():
+        while j < len(src) and src[j].isalpha():
+            j += 1
+        return src[i + 1:j], j
+    if j < len(src):
+        return src[j], j + 1
+    return None, i
+
+
+def _tex_verb_end(src, i):
+    """Index after \\verb's closing delimiter, or None if src[i] is not \\verb."""
+    name, j = _tex_control_word(src, i)
+    if name not in ('verb', 'lstinline'):
+        return None
+    n = len(src)
+    if name == 'verb' and j < n and src[j] == '*':
+        j += 1
+    while j < n and src[j] in ' \t':
+        j += 1
+    if j >= n or src[j] == '\n':
+        return None
+    delim = src[j]
+    k = src.find(delim, j + 1)
+    if k < 0:
+        return n
+    return k + 1
+
+
+def _tex_verb_inner(src, i, end):
+    name, j = _tex_control_word(src, i)
+    if name == 'verb' and j < end and src[j] == '*':
+        j += 1
+    while j < end and src[j] in ' \t':
+        j += 1
+    if j >= end:
+        return ''
+    return src[j + 1:end - 1]
+
+
+def _tex_expand_verbs(chunk):
+    out = []
+    i = 0
+    n = len(chunk)
+    while i < n:
+        end = _tex_verb_end(chunk, i)
+        if end is not None:
+            out.append(_tex_verb_inner(chunk, i, end))
+            i = end
+            continue
+        out.append(chunk[i])
+        i += 1
+    return ''.join(out)
+
+
+def _tex_skip_groups(src, j):
+    n = len(src)
+    while True:
+        while j < n and src[j].isspace():
+            j += 1
+        if j < n and src[j] == '*':
+            j += 1
+            continue
+        if j < n and src[j] == '[':
+            depth = 1
+            j += 1
+            while j < n and depth:
+                if src[j] == '\\' and j + 1 < n:
+                    j += 2
+                    continue
+                if src[j] == '[':
+                    depth += 1
+                elif src[j] == ']':
+                    depth -= 1
+                j += 1
+            continue
+        if j < n and src[j] == '{':
+            _, j = _tex_brace_arg(src, j)
+            continue
+        break
+    return j
+
+
+_TEX_SKIP_CMDS = {
+    'documentclass', 'usepackage', 'RequirePackage', 'setlength',
+    'newcommand', 'renewcommand', 'providecommand',
+    'addbibresource', 'nocite', 'makeindex',
+    'titlerunning', 'authorrunning', 'pagestyle', 'thispagestyle',
+    'maketitle', 'hypersetup', 'geometry', 'linespread',
+    'lstset', 'sisetup', 'numberwithin', 'setcounter',
+    'newtheorem', 'theoremstyle', 'newenvironment', 'renewenvironment',
+    'DeclareMathOperator', 'makeatletter', 'makeatother',
+    'newlength', 'newcounter',
+}
+_TEX_VERBATIM_ENVS = {'verbatim', 'lstlisting', 'alltt', 'minted'}
+
+
 def _strip_tex_comments(text):
-    """Remove TeX comments (% to EOL) while preserving \\%."""
+    """Remove TeX comments (% to EOL) while preserving \\% and verb/verbatim content."""
     out = []
     i = 0
     n = len(text)
     while i < n:
+        verb_end = _tex_verb_end(text, i)
+        if verb_end is not None:
+            out.append(text[i:verb_end])
+            i = verb_end
+            continue
+        if text.startswith('\\begin{', i):
+            close = text.find('}', i + 7)
+            env = text[i + 7:close] if close > 0 else ''
+            if env.rstrip('*') in _TEX_VERBATIM_ENVS or env in _TEX_VERBATIM_ENVS:
+                end_tok = '\\end{' + env + '}'
+                k = text.find(end_tok, i)
+                if k < 0:
+                    out.append(text[i:])
+                    break
+                out.append(text[i:k + len(end_tok)])
+                i = k + len(end_tok)
+                continue
         ch = text[i]
         if ch == '\\' and i + 1 < n:
             out.append(ch)
@@ -350,6 +882,10 @@ def _tex_brace_arg(src, start):
     depth = 0
     i = start
     while i < len(src):
+        verb_end = _tex_verb_end(src, i)
+        if verb_end is not None:
+            i = verb_end
+            continue
         if src[i] == '\\' and i + 1 < len(src):
             i += 2
             continue
@@ -374,9 +910,17 @@ def _tex_unwrap_inline(s):
         prev = s
         for pat, repl in patterns:
             s = re.sub(pat, repl, s)
-    # Soft-strip simple non-arg commands that are pure styling switches.
     s = re.sub(r'\\(?:noindent|bigskip|medskip|smallskip|hfill|vfill|quad|qquad)\b\s*', '', s)
     return s
+
+
+def _tex_clean_meta(value):
+    value = _tex_unwrap_inline(_tex_expand_verbs(value))
+    value = re.sub(r'\\and\b', ' ', value)
+    value = re.sub(r'\\inst\s*\{[^{}]*\}', '', value)
+    value = re.sub(r'\\email\s*\{([^{}]*)\}', r'\1', value)
+    value = re.sub(r'\s+', ' ', value).strip()
+    return value
 
 
 def _import_tex(raw, add, issues):
@@ -400,12 +944,10 @@ def _import_tex(raw, add, issues):
         return {'start': idx, 'end': end, 'line_start': ls, 'line_end': le}, end
 
     cursor = 0
-    sectioning = re.compile(r'\\(title|chapter|section|subsection|subsubsection)\s*(\*?)')
-    input_cmd = re.compile(r'\\(input|include)\s*\{')
-    includegraphics = re.compile(r'\\includegraphics(?:\[[^\]]*\])?\s*\{')
+    sectioning = re.compile(r'\\(title|chapter|section|subsection|subsubsection)(?![A-Za-z])\s*\*?')
+    input_cmd = re.compile(r'\\(input|include)(?![A-Za-z])\s*\{')
+    includegraphics = re.compile(r'\\includegraphics(?![A-Za-z])(?:\[[^\]]*\])?\s*\{')
     begin_env = re.compile(r'\\begin\{([a-zA-Z*]+)\}')
-    # Text containers: recurse with the same sectioning/equation/input logic.
-    # List-like envs nest, so the matching \\end must honor depth (not the first hit).
     CONTAINER_ENVS = {
         'document', 'abstract',
         'itemize', 'enumerate', 'description', 'list', 'trivlist',
@@ -422,6 +964,10 @@ def _import_tex(raw, add, issues):
         i = start_body
         nsrc = len(src)
         while i < nsrc:
+            verb_end = _tex_verb_end(src, i)
+            if verb_end is not None:
+                i = verb_end
+                continue
             if src.startswith(begin_tok, i):
                 depth += 1
                 i += len(begin_tok)
@@ -437,7 +983,7 @@ def _import_tex(raw, add, issues):
 
     def emit_text_run(src, run_start, run_end):
         nonlocal cursor
-        chunk = src[run_start:run_end]
+        chunk = _tex_expand_verbs(src[run_start:run_end])
         parts = re.split(r'(\n\s*\n)', chunk)
         for part in parts:
             if re.fullmatch(r'\n\s*\n', part or '') or not part.strip():
@@ -456,6 +1002,11 @@ def _import_tex(raw, add, issues):
         i = 0
         n = len(src)
         while i < n:
+            verb_end = _tex_verb_end(src, i)
+            if verb_end is not None:
+                i = verb_end
+                continue
+
             m_env = begin_env.match(src, i)
             m_sec = sectioning.match(src, i)
             m_in = input_cmd.match(src, i)
@@ -476,9 +1027,8 @@ def _import_tex(raw, add, issues):
                     next_i = end_idx + len(end_marker)
                 body_st = body.strip()
                 if env in CONTAINER_ENVS:
-                    # Recurse: preserve math/sectioning/input/includegraphics inside.
                     parse_span(body)
-                elif env in ('verbatim', 'lstlisting', 'alltt', 'minted'):
+                elif env.rstrip('*') in _TEX_VERBATIM_ENVS or env in _TEX_VERBATIM_ENVS:
                     loc, cursor = locate_in(original, body_st or env, cursor)
                     add(body_st, loc, 'code')
                 elif env in ('equation', 'equation*', 'align', 'align*', 'displaymath', 'eqnarray', 'eqnarray*'):
@@ -506,8 +1056,6 @@ def _import_tex(raw, add, issues):
                         loc, cursor = locate_in(original, cleaned[:80], cursor)
                         add(cleaned, loc, 'paragraph')
                 else:
-                    # Not safe to regex-clean: stripping one brace group turns
-                    # \frac{d}{t} into {t}. Keep the raw fragment and record it.
                     raw_body = body.strip()
                     if raw_body:
                         loc, cursor = locate_in(original, raw_body, cursor)
@@ -582,6 +1130,48 @@ def _import_tex(raw, add, issues):
                     'message': f'TeX \\includegraphics{{{(inner or "").strip()}}} not embedded (no LaTeX compilation; asset unresolved)',
                     'resolution': None,
                 })
+                pending_start = after
+                i = after
+                continue
+
+            name, name_end = _tex_control_word(src, i)
+            if name in _TEX_SKIP_CMDS:
+                if i > pending_start:
+                    emit_text_run(src, pending_start, i)
+                after = _tex_skip_groups(src, name_end)
+                pending_start = after
+                i = after
+                continue
+            if name in ('author', 'institute', 'date'):
+                if i > pending_start:
+                    emit_text_run(src, pending_start, i)
+                j = name_end
+                while j < n and src[j].isspace():
+                    j += 1
+                if j < n and src[j] == '*':
+                    j += 1
+                    while j < n and src[j].isspace():
+                        j += 1
+                if j < n and src[j] == '[':
+                    depth = 1
+                    j += 1
+                    while j < n and depth:
+                        if src[j] == '\\' and j + 1 < n:
+                            j += 2
+                            continue
+                        if src[j] == '[':
+                            depth += 1
+                        elif src[j] == ']':
+                            depth -= 1
+                        j += 1
+                    while j < n and src[j].isspace():
+                        j += 1
+                inner, after = _tex_brace_arg(src, j)
+                if inner:
+                    value = _tex_clean_meta(inner)
+                    if value:
+                        loc, cursor = locate_in(original, inner.strip(), cursor)
+                        add(value, loc, 'paragraph')
                 pending_start = after
                 i = after
                 continue

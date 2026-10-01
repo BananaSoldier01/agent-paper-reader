@@ -1,5 +1,6 @@
 """Synthetic fixtures for txt/html/docx/tex import (no personal papers)."""
 from pathlib import Path
+import re
 import pytest
 from reader import store
 from reader.importer import import_document
@@ -262,11 +263,8 @@ def test_docx_heading_caption_math_picture(data_dir):
     directory = folder(d['id'])
     assert any((directory / b['asset']).is_file() for b in figs)
     math_blocks = [b for b in d['blocks'] if b['kind'] == 'formula' or 'E=mc2' in b['text'].replace(' ', '')]
-    omath_issues = [i for i in d['issues'] if 'oMath' in i['message'] or 'equation' in i['message'].lower()]
-    assert math_blocks or omath_issues, 'oMath must not be silently dropped'
-    if math_blocks:
-        assert any('E=mc2' in b['text'].replace(' ', '') for b in math_blocks)
-    assert omath_issues, 'deferred math support must still record an issue when oMath is present'
+    assert math_blocks, 'oMath must not be silently dropped'
+    assert any('E=mc2' in b['text'].replace(' ', '') for b in math_blocks)
 
 
 def test_html_comment_and_nonvisible_nodes_not_imported(data_dir):
@@ -363,7 +361,221 @@ def test_docx_table_cell_image_and_math(data_dir):
     assert figs, 'table cell image must become a figure asset'
     directory = folder(d['id'])
     assert any((directory / b['asset']).is_file() and (directory / b['asset']).stat().st_size > 0 for b in figs)
-    math_blocks = [b for b in d['blocks'] if b['kind'] == 'formula' and 'E=mc²' in b['text']]
-    omath_issues = [i for i in d['issues'] if 'oMath' in i['message'] or 'equation' in i['message'].lower()]
-    assert math_blocks, 'oMath in a table cell needs a plain-text fallback'
-    assert omath_issues, 'oMath in a table cell must record an unresolved issue'
+    table = next(b for b in d['blocks'] if b['kind'] == 'table')
+    assert 'E=mc²' in table['text'].replace(' ', '') or 'E=mc^2' in table['text'].replace(' ', '')
+    assert 'Cell content.' in table['text']
+
+
+M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+
+
+def _omath(xml):
+    from docx.oxml import parse_xml
+    return parse_xml(f'<m:oMath xmlns:m="{M_NS}">{xml}</m:oMath>')
+
+
+def _omath_para(xml):
+    from docx.oxml import parse_xml
+    return parse_xml(
+        f'<m:oMathPara xmlns:m="{M_NS}"><m:oMath>{xml}</m:oMath></m:oMathPara>'
+    )
+
+
+def test_docx_inline_math_keeps_sentence_order(data_dir):
+    """P1: text runs and oMath stay in document order; fractions/scripts/grouping kept."""
+    from docx import Document
+
+    p = data_dir / 'inline_math.docx'
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run('Text A ')
+    para._p.append(_omath('<m:sSub><m:e><m:r><m:t>h</m:t></m:r></m:e><m:sub><m:r><m:t>1</m:t></m:r></m:sub></m:sSub>'))
+    para.add_run(' text B ')
+    para._p.append(_omath('<m:sSub><m:e><m:r><m:t>p</m:t></m:r></m:e><m:sub><m:r><m:t>2</m:t></m:r></m:sub></m:sSub>'))
+    para.add_run(' text C.')
+    frac = doc.add_paragraph()
+    frac.add_run('Ratio ')
+    frac._p.append(_omath(
+        '<m:f><m:num><m:r><m:t>a</m:t></m:r></m:num>'
+        '<m:den><m:r><m:t>b</m:t></m:r></m:den></m:f>'
+    ))
+    frac.add_run(' follows.')
+    group = doc.add_paragraph()
+    group.add_run('Group ')
+    group._p.append(_omath(
+        '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>'
+        '<m:e><m:r><m:t>x+y</m:t></m:r></m:e></m:d>'
+    ))
+    group.add_run('.')
+    disp = doc.add_paragraph()
+    disp._p.append(_omath_para(
+        '<m:sSub><m:e><m:r><m:t>h</m:t></m:r></m:e><m:sub><m:r><m:t>0</m:t></m:r></m:sub></m:sSub>'
+        '<m:r><m:t>=</m:t></m:r>'
+        '<m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>m</m:t></m:r></m:den></m:f>'
+    ))
+    table = doc.add_table(rows=1, cols=1)
+    cell_para = table.cell(0, 0).paragraphs[0]
+    cell_para.add_run('Cell ')
+    cell_para._p.append(_omath(
+        '<m:f><m:num><m:r><m:t>n</m:t></m:r></m:num>'
+        '<m:den><m:r><m:t>m</m:t></m:r></m:den></m:f>'
+    ))
+    doc.save(p)
+
+    d = import_document(p)
+    inline = next(b for b in d['blocks'] if 'Text A' in b['text'])
+    assert inline['kind'] == 'paragraph'
+    assert re.search(r'Text A\s*\$.+\$\s*text B\s*\$.+\$\s*text C\.', inline['text'])
+    assert 'h' in inline['text'] and 'p' in inline['text']
+    assert not any(b['id'] != inline['id'] and b['kind'] == 'formula' and ('h_1' in b['text'] or b['text'] in ('h1', 'p2')) for b in d['blocks'])
+    ratio = next(b for b in d['blocks'] if 'Ratio' in b['text'])
+    assert r'\frac' in ratio['text'] and '{a}' in ratio['text'] and '{b}' in ratio['text']
+    grouped = next(b for b in d['blocks'] if 'Group' in b['text'])
+    assert '(x+y)' in grouped['text'].replace(' ', '') or r'(x+y)' in grouped['text']
+    display = next(b for b in d['blocks'] if b['kind'] == 'formula')
+    assert r'\frac' in display['text']
+    cell = next(b for b in d['blocks'] if b['kind'] == 'table')
+    assert 'Cell' in cell['text'] and r'\frac' in cell['text']
+
+
+def test_docx_plain_super_subscript_runs(data_dir):
+    """P1: vertAlign superscript/subscript stays distinct; mixed equals stays in place."""
+    from docx import Document
+
+    p = data_dir / 'scripts.docx'
+    doc = Document()
+    sq = doc.add_paragraph()
+    sq.add_run('128')
+    r = sq.add_run('2')
+    r.font.superscript = True
+    sq.add_run(' image.')
+    cu = doc.add_paragraph()
+    cu.add_run('128')
+    r = cu.add_run('3')
+    r.font.superscript = True
+    cu.add_run(' volume.')
+    mixed = doc.add_paragraph()
+    mixed.add_run('38')
+    r = mixed.add_run('2')
+    r.font.superscript = True
+    mixed._p.append(_omath('<m:r><m:t>=</m:t></m:r>'))
+    mixed.add_run('1,444')
+    sub = doc.add_paragraph()
+    sub.add_run('H')
+    r = sub.add_run('2')
+    r.font.subscript = True
+    sub.add_run('O.')
+    doc.save(p)
+
+    d = import_document(p)
+    texts = [b['text'] for b in d['blocks']]
+    assert any('128²' in t for t in texts)
+    assert any('128³' in t for t in texts)
+    assert not any(re.search(r'1282\b', t) for t in texts)
+    assert not any(re.search(r'1283\b', t) for t in texts)
+    mixed_t = next(t for t in texts if '1,444' in t or '1444' in t)
+    eq_at = mixed_t.find('$=$')
+    if eq_at < 0:
+        eq_at = mixed_t.find('=')
+    assert eq_at > mixed_t.find('38')
+    assert '1,444' in mixed_t[eq_at:]
+    assert any('H₂O' in t or 'H$_{2}$O' in t or 'H$_2$O' in t for t in texts)
+
+
+def test_tex_verb_not_treated_as_structure(data_dir):
+    """P1: \\verb delimiters hide section/input/env tokens from the structure scan."""
+    p = data_dir / 'verb.tex'
+    p.write_text(
+        'Tags look like: \\verb |\\section| or \\verb |\\paragraph|.\n'
+        '\\section{Actual heading}\n'
+        'Actual body.\n'
+        '\n'
+        'Also \\verb |\\input{secret.tex}| and \\verb |\\begin{document}| stay literal.\n',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    headings = [b for b in d['blocks'] if b['kind'] == 'heading']
+    assert [b['text'] for b in headings] == ['Actual heading']
+    sample = next(b for b in d['blocks'] if 'Tags look like' in b['text'])
+    assert r'\section' in sample['text']
+    assert r'\paragraph' in sample['text']
+    assert sample['kind'] == 'paragraph'
+    literal = next(b for b in d['blocks'] if 'stay literal' in b['text'])
+    assert r'\input{secret.tex}' in literal['text']
+    assert r'\begin{document}' in literal['text']
+    assert not any('secret.tex' in i['message'] for i in d['issues'])
+    assert not any(b['kind'] == 'heading' and 'paragraph' in b['text'].lower() for b in d['blocks'])
+
+
+def test_tex_full_control_words_and_preamble_metadata(data_dir):
+    """P2: titlerunning is not title; preamble macros stay out of body; metadata is kept."""
+    wrapped = data_dir / 'meta.tex'
+    wrapped.write_text(
+        '\\documentclass{article}\n'
+        '\\usepackage{graphicx}\n'
+        '\\newcommand{\\foo}{bar}\n'
+        '\\titlerunning{HTML papers on arXiv}\n'
+        '\\title{Real Title}\n'
+        '\\author{Ada Lovelace}\n'
+        '\\begin{document}\n'
+        '\\section{Body}\n'
+        'Hello body.\n'
+        '\\end{document}\n',
+        encoding='utf-8',
+    )
+    d = import_document(wrapped)
+    texts = [b['text'] for b in d['blocks']]
+    headings = [b['text'] for b in d['blocks'] if b['kind'] == 'heading']
+    assert 'Real Title' in headings
+    assert 'Body' in headings
+    assert not any('running{' in t or t.startswith('running') for t in texts)
+    assert not any('usepackage' in t or 'newcommand' in t or '\\foo' in t for t in texts)
+    assert any('Ada Lovelace' in t for t in texts)
+    assert any('Hello body.' in t for t in texts)
+
+    bare = data_dir / 'bare.tex'
+    bare.write_text(
+        '\\title{Outside Title}\n'
+        '\\author{Grace Hopper}\n'
+        '\\titlerunning{should not be title}\n'
+        '\\newcommand{\\x}{y}\n'
+        'Hello body without document env.\n',
+        encoding='utf-8',
+    )
+    d2 = import_document(bare)
+    headings2 = [b['text'] for b in d2['blocks'] if b['kind'] == 'heading']
+    texts2 = [b['text'] for b in d2['blocks']]
+    assert 'Outside Title' in headings2
+    assert any('Grace Hopper' in t for t in texts2)
+    assert not any('should not be title' in t for t in texts2)
+    assert not any(t.startswith('running') for t in headings2)
+    assert any('Hello body without document env.' in t for t in texts2)
+    assert not any('\\x' == t or t.startswith('\\newcommand') for t in texts2)
+
+
+def test_html_mathml_annotation_and_inline_spacing(data_dir):
+    """P2: TeX logos stay unspaced; MathML annotation is not duplicated; keep real word spaces."""
+    p = data_dir / 'mathml.html'
+    p.write_text(
+        '<html><body>'
+        '<p>From <span class="ltx_TeX_logo" style="letter-spacing:-0.2em;">'
+        'T<span>e</span>X</span> '
+        '<math alttext="\\rightarrow" display="inline">'
+        '<semantics><mo stretchy="false">→</mo>'
+        '<annotation encoding="application/x-tex">\\rightarrow</annotation>'
+        '</semantics></math> PDF.</p>'
+        '<p>Keep <em>inline</em> space.</p>'
+        '<p>Glue<span>d</span>word</p>'
+        '</body></html>',
+        encoding='utf-8',
+    )
+    d = import_document(p)
+    texts = [b['text'] for b in d['blocks']]
+    logo = next(t for t in texts if 'PDF' in t)
+    assert 'TeX' in logo
+    assert 'T e X' not in logo
+    assert logo.count('\\rightarrow') + logo.count('→') == 1
+    assert not ('→' in logo and '\\rightarrow' in logo)
+    assert any(t == 'Keep inline space.' for t in texts)
+    assert any(t == 'Gluedword' for t in texts)
+
