@@ -64,6 +64,27 @@ _WHITE = '#ffffff'
 
 _RASTER_CANDIDATES = ('rsvg-convert', 'inkscape')
 
+# MS-EMF records that do not emit pixels. State we already apply is handled in
+# _record; these remaining types are safe to skip (comments, palettes, ICM).
+_IGNORABLE_RECORDS = frozenset({
+    1, 13, 14, 16, 20, 21, 23, 48, 49, 50, 51, 52, 57, 58, 65, 66, 68, 70,
+    98, 99, 100, 101, 104, 105, 106, 109, 110, 111, 112, 113, 115, 119,
+    121, 122,
+})
+# EMR_BITBLT raster op "D": destination unchanged. Word previews use this with
+# no source bits as a no-op; it must not be treated as missing picture content.
+_BITBLT_NOP_ROP = 0x00AA0029
+
+# fc-match always returns some face. Only these families prove the requested coverage.
+_TIMES_FAMILIES = frozenset({
+    'times new roman', 'times', 'liberation serif', 'tinos',
+    'nimbus roman', 'nimbus roman no9 l', 'texgyre termes', 'tex gyre termes',
+    'free serif',
+})
+_SYMBOL_FAMILIES = frozenset({
+    'opensymbol', 'star symbol', 'starsymbol', 'standard symbols l',
+})
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -74,41 +95,63 @@ def _which(name: str) -> str | None:
     return found if found else None
 
 
-def _fc_match(family: str) -> str | None:
+def _fc_family(request: str) -> str | None:
+    """Matched family name only. Never returns a filesystem path."""
     fc = _which('fc-match')
     if not fc:
         return None
     try:
         out = subprocess.run(
-            [fc, '-f', '%{file}', family],
+            [fc, '-f', '%{family}', request],
             check=False, capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     if out.returncode != 0:
         return None
-    path = (out.stdout or '').strip()
-    return path if path and Path(path).is_file() else None
+    raw = (out.stdout or '').strip()
+    if not raw:
+        return None
+    return raw.split(',')[0].strip() or None
+
+
+def _family_allowed(family: str | None, allowed: frozenset[str]) -> bool:
+    if not family:
+        return False
+    name = ' '.join(family.split()).casefold()
+    if name in allowed:
+        return True
+    return any(name.startswith(item + ' ') for item in allowed)
 
 
 def emf_env_status() -> dict:
-    """PATH and fontconfig discovery for EMF preview conversion. No absolute tool paths are stored."""
+    """PATH and fontconfig discovery for EMF preview conversion. No absolute tool or font paths are stored."""
     raster = next((name for name in _RASTER_CANDIDATES if _which(name)), None)
-    times = _fc_match('Times New Roman')
-    symbol = _fc_match('OpenSymbol')
+    times_family = _fc_family('Times New Roman')
+    symbol_family = _fc_family('OpenSymbol')
+    times_ok = _family_allowed(times_family, _TIMES_FAMILIES)
+    symbol_ok = _family_allowed(symbol_family, _SYMBOL_FAMILIES)
     checks = {
         'rasterizer': raster,
-        'times_font': bool(times),
-        'symbol_font': bool(symbol),
+        'times_font': times_ok,
+        'times_family': times_family,
+        'symbol_font': symbol_ok,
+        'symbol_family': symbol_family,
     }
-    checks['ready'] = bool(raster and times and symbol)
+    checks['ready'] = bool(raster and times_ok and symbol_ok)
     missing = []
     if not raster:
         missing.append('rsvg-convert (librsvg2-bin) or inkscape')
-    if not times:
-        missing.append('a fontconfig match for Times New Roman (fonts-liberation or fonts-croscore)')
-    if not symbol:
-        missing.append('OpenSymbol (fonts-opensymbol)')
+    if not times_ok:
+        detail = 'a fontconfig match for Times New Roman (fonts-liberation or fonts-croscore)'
+        if times_family:
+            detail += f'; fc-match returned {times_family}'
+        missing.append(detail)
+    if not symbol_ok:
+        detail = 'OpenSymbol (fonts-opensymbol)'
+        if symbol_family:
+            detail += f'; fc-match returned {symbol_family}'
+        missing.append(detail)
     checks['missing'] = missing
     return checks
 
@@ -668,8 +711,11 @@ class EmfPlay:
                 cid = f'c{self.clip_serial}'
                 self.elements.append(f'<clipPath id="{cid}"><path d="{d}"/></clipPath>')
                 self.clips.append(cid)
-        elif typ == 43 and size >= 40:  # RECTANGLE
-            l, t, r, b = struct.unpack_from('<iiii', data, off + 24)
+        elif typ == 43:  # RECTANGLE: Type(4)+Size(4)+Box(16)=24, Box at offset 8
+            box = self._rectl(off, size, 'RECTANGLE')
+            if box is None:
+                return
+            l, t, r, b = box
             self._start_sub(l, t)
             self._line_to(r, t)
             self._line_to(r, b)
@@ -677,9 +723,33 @@ class EmfPlay:
             self._close_sub()
             if not self.in_path:
                 self._immediate_path(True, True)
-        elif typ == 42 and size >= 40:  # ELLIPSE
-            l, t, r, b = struct.unpack_from('<iiii', data, off + 24)
+        elif typ == 42:  # ELLIPSE: same 24-byte layout as RECTANGLE
+            box = self._rectl(off, size, 'ELLIPSE')
+            if box is None:
+                return
+            l, t, r, b = box
             self._ellipse(l, t, r, b)
+        elif typ == 76:  # BITBLT
+            if self._noop_bitblt(off, size):
+                return
+            self.errors.append('unsupported drawing record EMR_BITBLT')
+        elif typ in _IGNORABLE_RECORDS:
+            return
+        else:
+            self.errors.append(f'unsupported drawing record type {typ}')
+
+    def _rectl(self, off: int, size: int, name: str):
+        if size < 24:
+            self.errors.append(f'truncated EMR_{name} (size {size})')
+            return None
+        return struct.unpack_from('<iiii', self.data, off + 8)
+
+    def _noop_bitblt(self, off: int, size: int) -> bool:
+        if size < 100:
+            return False
+        rop = struct.unpack_from('<I', self.data, off + 40)[0]
+        cb_bits = struct.unpack_from('<I', self.data, off + 96)[0]
+        return rop == _BITBLT_NOP_ROP and cb_bits == 0
 
     def _ellipse(self, l, t, r, b):
         # Approximate with four cubics.
@@ -937,7 +1007,9 @@ def convert_emf_preview(blob: bytes) -> dict:
     record = {
         'backend': 'emf-gdi-playback',
         'input_sha256': _sha256(blob),
-        'environment': {k: env[k] for k in ('rasterizer', 'times_font', 'symbol_font', 'ready', 'missing')},
+        'environment': {k: env[k] for k in (
+            'rasterizer', 'times_font', 'times_family', 'symbol_font', 'symbol_family', 'ready', 'missing',
+        )},
         'fidelity': [],
         'ok': False,
     }

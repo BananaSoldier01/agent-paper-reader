@@ -1170,14 +1170,16 @@ def _emf_record(typ, payload):
     return struct.pack('<II', typ, 8 + len(payload)) + payload
 
 
-def _minimal_labeled_emf():
-    """A small valid EMF: one rectangle plus the word Domain. No real paper bytes."""
+def _minimal_labeled_emf(shape_records=None):
+    """A small valid EMF: one standard 24-byte rectangle plus the word Domain. No real paper bytes."""
     import struct
     records = []
     records.append(_emf_record(37, struct.pack('<I', 0x80000004)))
     records.append(_emf_record(37, struct.pack('<I', 0x80000007)))
-    rect = struct.pack('<iiii', 8, 8, 48, 36)
-    records.append(_emf_record(43, rect + rect))
+    if shape_records is None:
+        # EMR_RECTANGLE is Type+Size+Box = 24 bytes; Box starts at offset 8.
+        shape_records = [_emf_record(43, struct.pack('<iiii', 8, 8, 48, 36))]
+    records.extend(shape_records)
     logfont = struct.pack('<iiiii', -28, 0, 0, 0, 400) + bytes(8)
     name = 'Times New Roman'.encode('utf-16le')
     name = name + b'\x00' * (64 - len(name))
@@ -1212,6 +1214,19 @@ def _minimal_labeled_emf():
     header += struct.pack('<IIII', 1920, 1080, 320, 180)
     assert len(header) == 88
     return header + chunks
+
+
+def _emf_records(blob):
+    import struct
+    off = struct.unpack_from('<I', blob, 4)[0]
+    found = []
+    while off + 8 <= len(blob):
+        typ, size = struct.unpack_from('<II', blob, off)
+        found.append((typ, size, off))
+        if typ == 14 or size < 8:
+            break
+        off += size
+    return found
 
 
 def test_emf_fidelity_rejects_missing_labels_and_stacked_glyphs():
@@ -1302,4 +1317,120 @@ def test_docx_ole_emf_converts_when_environment_is_ready(data_dir):
     assert png.startswith(b'\x89PNG')
     svg = (directory / figs[0]['asset'].replace('.png', '.svg')).read_text(encoding='utf-8')
     assert 'Domain' in re.sub(r'<[^>]+>', '', svg)
+    assert svg.count('<path') >= 1
+    assert 'M 8.00 8.00' in svg
+
+
+def test_standard_emf_rectangle_and_ellipse_are_drawn():
+    """MS-EMF EMR_RECTANGLE/ELLIPSE are 24 bytes with Box at offset 8; they must be painted."""
+    import struct
+    from reader.emfconv import render_emf_svg
+
+    blob = _minimal_labeled_emf()
+    recs = _emf_records(blob)
+    rect = next((item for item in recs if item[0] == 43), None)
+    assert rect is not None and rect[1] == 24
+    off = rect[2]
+    assert struct.unpack_from('<iiii', blob, off + 8) == (8, 8, 48, 36)
+    play, svg = render_emf_svg(blob)
+    assert play is not None and svg is not None
+    assert play.errors == []
+    assert svg.count('<path') >= 1
+    assert 'M 8.00 8.00' in svg and 'L 48.00 8.00' in svg and 'L 48.00 36.00' in svg
+    assert 'Domain' in re.sub(r'<[^>]+>', '', svg)
+
+    ellipse = _minimal_labeled_emf([_emf_record(42, struct.pack('<iiii', 10, 10, 70, 50))])
+    erec = next(item for item in _emf_records(ellipse) if item[0] == 42)
+    assert erec[1] == 24
+    eplay, esvg = render_emf_svg(ellipse)
+    assert eplay is not None and esvg is not None
+    assert eplay.errors == []
+    assert esvg.count('<path') >= 1
+    assert 'C ' in esvg
+
+
+def test_emf_unsupported_drawing_does_not_auto_resolve(data_dir):
+    """A skipped or unsupported drawing record must not auto-resolve just because text remains."""
+    import struct
+    from reader.emfconv import convert_emf_preview, emf_env_status, render_emf_svg
+    from reader.store import folder
+
+    # EMR_ROUNDRECT is a visible shape this playback does not draw.
+    roundrect = _emf_record(44, struct.pack('<iiiiii', 8, 8, 48, 36, 6, 6))
+    blob = _minimal_labeled_emf([roundrect])
+    play, svg = render_emf_svg(blob)
+    assert play is not None
+    assert play.errors
+    assert any('unsupported' in err and '44' in err for err in play.errors)
+    assert svg is None
+    result = convert_emf_preview(blob)
+    assert result['ok'] is False
+
+    p = data_dir / 'ole-roundrect.docx'
+    _write_ole_docx(p, 'image7.emf', blob)
+    d = import_document(p)
+    issue = next(i for i in d['issues'] if str(i['id']).startswith('docx-ole-'))
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure']
+    assert figs and not figs[0].get('asset')
+    assert issue['resolution'] is None
+    directory = folder(d['id'])
+    record = next(directory.glob('image-*.conversion.json')).read_text(encoding='utf-8')
+    assert '"ok": false' in record
+    assert 'unsupported' in record
+    env = emf_env_status()
+    if env['ready']:
+        assert 'fidelity' not in (issue['resolution'] or '')
+
+
+def test_emf_env_rejects_unverified_symbol_fallback(monkeypatch):
+    import json
+    from reader import emfconv
+
+    monkeypatch.setattr(
+        emfconv, '_fc_family',
+        lambda request: 'Verdana' if request == 'OpenSymbol' else 'Tinos',
+    )
+    real_which = emfconv._which
+
+    def which(name):
+        if name == 'rsvg-convert':
+            return 'rsvg-convert'
+        return real_which(name)
+
+    monkeypatch.setattr(emfconv, '_which', which)
+    status = emfconv.emf_env_status()
+    assert status['symbol_font'] is False
+    assert status['symbol_family'] == 'Verdana'
+    assert status['times_font'] is True
+    assert status['times_family'] == 'Tinos'
+    assert status['ready'] is False
+    missing = ' '.join(status['missing'])
+    assert 'OpenSymbol' in missing and 'Verdana' in missing
+    dumped = json.dumps(status)
+    assert '/usr/' not in dumped and '/System/' not in dumped
+    assert '.ttf' not in dumped and '.otf' not in dumped
+
+
+def test_emf_env_accepts_verified_symbol_family(monkeypatch):
+    from reader import emfconv
+
+    monkeypatch.setattr(
+        emfconv, '_fc_family',
+        lambda request: 'OpenSymbol' if request == 'OpenSymbol' else 'Liberation Serif',
+    )
+    real_which = emfconv._which
+
+    def which(name):
+        if name == 'rsvg-convert':
+            return 'rsvg-convert'
+        return real_which(name)
+
+    monkeypatch.setattr(emfconv, '_which', which)
+    status = emfconv.emf_env_status()
+    assert status['symbol_font'] is True
+    assert status['symbol_family'] == 'OpenSymbol'
+    assert status['times_font'] is True
+    assert status['times_family'] == 'Liberation Serif'
+    assert status['ready'] is True
+    assert status['missing'] == []
 
