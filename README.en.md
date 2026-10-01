@@ -15,13 +15,24 @@
 
 A **Skill** that turns an English document or article (text PDF, Markdown, plain text, local HTML, Word `.docx`, or single-file LaTeX `.tex`) into a self-contained bilingual HTML reader. Your current Agent reads the context, translates, organizes terminology, and reviews the result. **No local server is required by default, and no separate translation API key is needed.**
 
-Version 1 supports **English → Simplified Chinese**. An optional local library adds multi-document management, saved annotations, and translation revisions. Skill instructions and reference guides are currently in Chinese.
+The current source supports **English → Simplified Chinese**. An optional local library adds multi-document management, saved annotations, and translation revisions. Skill instructions and reference guides are currently in Chinese.
 
 ## What can I read?
 
 Research papers, reports, technical documentation, industry analysis, and ordinary English articles use the same reading workflow. Preserve the source structure; an article does not need an academic format.
 
-**Supported inputs:** text-based PDF, UTF-8 Markdown (`.md`/`.markdown`), plain text (`.txt`), local HTML/HTM archives, Word (`.docx`), and single-file LaTeX (`.tex`). Provide web articles as local files first. This version does not fetch URLs, run OCR, or accept EPUB or other language directions. HTML means local archive parsing (not site crawling); TeX does not expand `\input`/`\include`; complex DOCX layouts have limited support.
+All six formats use the same structure, translation, semantic alignment, second review, and HTML export workflow:
+
+| Original document | File type | Scope and limits |
+| --- | --- | --- |
+| Text-based PDF | `.pdf` | Extracts text and keeps page images for verification; scanned pages are not OCRed. |
+| Markdown | `.md` / `.markdown` | UTF-8 text with headings, lists, tables, and code; provide local images alongside the document. |
+| Plain text | `.txt` | UTF-8 text, with blank lines separating candidate paragraphs. |
+| Local web archive | `.html` / `.htm` | Parses text structure and copies relative images from the document's directory; does not fetch URLs or remote images. The Agent checks navigation and footer content during structure review. |
+| Word | `.docx` | Ordinary body text, headings, tables, common equations, superscripts/subscripts, and embedded images. Complex headers/footers, text boxes, tracked changes, and general OLE objects have limited support. Some EMF images need the optional dependencies below. |
+| Single-file LaTeX | `.tex` | Main-file text, headings, equations, and code; no `\input` / `\include` expansion, compilation, or external `.bib` / `.bbl` loading. Missing `\includegraphics` images remain issues requiring verification and completion. |
+
+Save web articles as local files before giving them to the Agent. This version does not run OCR or accept EPUB or other language directions. Extracted content still requires source-based structure review and translation review by the Agent.
 
 ## See it in action
 
@@ -75,7 +86,8 @@ Please install this Skill for me:
 https://github.com/BananaSoldier01/agent-paper-reader
 
 Read the repository README and SKILL.md first, then install the complete
-Skill using a method supported by the current Agent.
+Skill from the current main branch using a method supported by this Agent.
+For multiple input formats, do not install the old v0.1.0 package.
 Confirm the appropriate installation directory and check prerequisites,
 including Python 3.12+. Preserve existing configuration and document data.
 When finished, tell me where it is installed, whether it is ready to use,
@@ -84,12 +96,26 @@ and how to start processing an article.
 
 Your Agent can fetch the repository or release package and check the installation for your environment. **You do not need to download, extract, or locate folders manually first.** Installation methods and permissions vary by host; rely on actual checks to confirm success.
 
-Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. Processing documents also requires the Agent to inspect pages. Displaying a Word.Picture.8 EMF preview also needs `rsvg-convert` (`librsvg2-bin`) or `inkscape` on `PATH`, plus a fontconfig Times New Roman substitute and OpenSymbol. `doctor` reports that under `emf_preview`. Without those packages the original EMF is kept and the issue stays unresolved.
+Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. Processing documents also requires the Agent to inspect pages.
+
+<details>
+<summary>Optional environment for some embedded Word EMF images</summary>
+
+Automatically displaying these vector images also requires:
+
+- `rsvg-convert` or Inkscape on `PATH`. The Linux package is `librsvg2-bin`; macOS can use Homebrew's `librsvg`.
+- `fontconfig` / `fc-match` matches for Times New Roman or a compatible family, and OpenSymbol. Linux packages include `fonts-liberation` or `fonts-croscore`, and `fonts-opensymbol`. An arbitrary fallback font does not prove the required coverage.
+
+Run `doctor` and inspect `emf_preview.ready`, the matched font families, and `missing`. Python `setup` does not install these system tools or fonts. Missing dependencies, failed conversion, or unreliable output leave the original EMF and issue record intact; the image must not be reported as restored. These extra components are only needed for the relevant Word images, not ordinary inputs such as PDF.
+
+</details>
 
 <details>
 <summary>Manual installation and directory layout (optional)</summary>
 
-Download the [v0.1.0 compact Skill package](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) and place the complete extracted `agent-paper-reader/` folder in a Skill directory supported by your Agent.
+For the multiple input formats listed here, download the [main source ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip), extract it, and place the complete source directory in your Agent's Skill directory under the name `agent-paper-reader`.
+
+The [v0.1.0 compact package](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) is an older version with PDF / Markdown inputs only. Updating main does not change that release asset.
 
 This repository is also a complete Skill, with [SKILL.md](SKILL.md) as its entry point. You can install the full repository contents; **do not copy only SKILL.md**. For a project supporting `.agents/skills`:
 
@@ -119,7 +145,7 @@ and complete a second review. Do not start a server by default.
 Return the HTML file and any processing limitations.
 ```
 
-Keep the workspace **outside the Skill installation directory**. It stores originals, progress, and reading data, so updating the Skill does not require translating again.
+Replace the path with your document; `.md`, `.txt`, `.html`, `.docx`, and `.tex` use the same instructions and workflow. Keep the workspace **outside the Skill installation directory**. It stores originals, progress, and reading data, so updating the Skill does not require translating again.
 
 ### 3. Open the HTML
 
@@ -149,6 +175,7 @@ The [local library guide](references/library.md) covers startup, existing docume
 <summary>Command-line entry points and workspace layout</summary>
 
 ```sh
+python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library doctor
 python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library setup
 python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library import /path/to/paper.pdf
 # After the Agent completes structure, translation, alignment, and review:

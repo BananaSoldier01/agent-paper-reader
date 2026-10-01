@@ -15,13 +15,24 @@
 
 一个以 **Skill** 交付的英文文献与文章精读工具。由你当前使用的 Agent 理解全文上下文、翻译、整理术语并复核，生成一份可独立打开的双语 HTML。**默认无需启动服务，也不需要额外配置翻译 API Key。**
 
-第一版面向 **英文原文 → 简体中文**，输入支持文字型 PDF、Markdown、纯文本、本地 HTML、Word (.docx) 与单文件 LaTeX (.tex)。需要长期管理文献、划线笔记和修订译文时，再开启随包提供的本地文献库。
+当前源码面向 **英文原文 → 简体中文**，输入支持文字型 PDF、Markdown、纯文本、本地 HTML、Word (.docx) 与单文件 LaTeX (.tex)。需要长期管理文献、划线笔记和修订译文时，再开启随包提供的本地文献库。
 
 ## 适合读什么
 
 论文、研究报告、技术文档、行业分析和普通英文文章，都可以使用同一套对照阅读流程。处理时保留原文结构，不要求内容具有论文格式。
 
-**当前输入：** 文字型 PDF、UTF-8 Markdown（.md/.markdown）、纯文本（.txt）、本地 HTML/HTM 存档、Word（.docx）、单文件 LaTeX（.tex）。网页需先保存为本地文件再导入；本版不抓取网址，不做 OCR，不支持 EPUB 或其他语言方向。HTML 是本地存档解析而非站点爬取；TeX 不展开 `\input`/`\include`；DOCX 复杂版式支持有限。
+六种格式使用同一套结构整理、翻译、语义对齐、第二轮复核和 HTML 导出流程：
+
+| 原始文档 | 文件类型 | 处理范围与边界 |
+| --- | --- | --- |
+| 文字型 PDF | `.pdf` | 提取文本并保留原页供核对；扫描件不做 OCR。 |
+| Markdown | `.md` / `.markdown` | UTF-8 文本，保留标题、列表、表格和代码；本地图像需与文档一起提供。 |
+| 纯文本 | `.txt` | UTF-8 文本，按空行整理候选段落。 |
+| 本地网页存档 | `.html` / `.htm` | 解析文本结构；只复制文档同目录的相对本地图像，不抓取网址或远程图。网页导航、页脚需由 Agent 在结构阶段核对。 |
+| Word | `.docx` | 支持普通正文、标题、表格、常见公式、上下标及嵌入图像；复杂页眉页脚、文本框、修订和一般 OLE 对象支持有限。部分 EMF 嵌入图需要下方的可选依赖。 |
+| 单文件 LaTeX | `.tex` | 处理主文件中的正文、标题、公式和代码；不展开 `\input` / `\include`，不编译，也不载入外部 `.bib` / `.bbl`。`\includegraphics` 缺图会保留问题，需核对补齐。 |
+
+网页文章先保存为本地文件再交给 Agent。本版不做 OCR，不支持 EPUB 或其他语言方向；提取后的内容仍需 Agent 结合原件整理和复核。
 
 ## 实机演示
 
@@ -76,19 +87,34 @@
 请帮我安装这个 Skill：
 https://github.com/BananaSoldier01/agent-paper-reader
 
-先阅读仓库 README 和 SKILL.md，按当前 Agent 支持的方式安装完整 Skill。
+先阅读仓库 README 和 SKILL.md，从 main 分支当前源码安装完整 Skill。
+按当前 Agent 支持的方式安装；需要多格式输入时，不要使用旧版 v0.1.0 安装包。
 请确认适合当前环境的安装目录，并检查 Python 3.12+ 等运行条件。
 保留已有配置与文献数据，完成后告诉我安装位置、是否可用，以及如何开始处理文章。
 ```
 
 Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**不需要先手动下载、解压或查找文件夹。** 不同 Agent 的安装方式与权限要求可能不同；安装是否成功，以实际检查结果为准。
 
-需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。处理文献时，Agent 还需要具备页面查看能力。Word 里 Word.Picture.8 的 EMF 预览若要显示成图，系统 PATH 上还要有 `rsvg-convert`（包 `librsvg2-bin`）或 `inkscape`，以及 Times New Roman 的字体替代和 OpenSymbol；`doctor` 的 `emf_preview` 会报告是否齐全。没有这些包时原文 EMF 仍会保留，对应问题保持未解决。Word 里 Word.Picture.8 的 EMF 预览若要显示成图，系统 PATH 上还要有 `rsvg-convert`（`librsvg2-bin`）或 `inkscape`，以及 Times New Roman 的字体替代和 OpenSymbol；`doctor` 的 `emf_preview` 会报告是否齐全。没有这些包时原文 EMF 仍会保留，对应问题保持未解决。
+需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。处理文献时，Agent 还需要具备页面查看能力。
+
+<details>
+<summary>Word 中部分 EMF 嵌入图的额外环境（可选）</summary>
+
+要将这类矢量图自动转换成阅读页可显示的图像，本机还需具备：
+
+- `PATH` 上的 `rsvg-convert` 或 Inkscape。Linux 的相关包为 `librsvg2-bin`；macOS 可使用 Homebrew 的 `librsvg`。
+- `fontconfig` / `fc-match` 能识别 Times New Roman 或兼容字体，以及 OpenSymbol。Linux 可使用 `fonts-liberation` 或 `fonts-croscore`、`fonts-opensymbol`；不能仅凭任意回退字体存在就判断齐全。
+
+运行 `doctor`，查看 `emf_preview.ready`、实际匹配的字体 family 和 `missing`。这些系统工具和字体不会由 Python 的 `setup` 自动安装。缺少环境、转换失败或结果不可靠时，原始 EMF 和问题记录会保留，不能按已经恢复图片交付。这些额外组件只用于相关 Word 嵌入图，普通 PDF 等输入不要求它们。
+
+</details>
 
 <details>
 <summary>手动安装与目录说明（可选）</summary>
 
-下载 [v0.1.0 精简 Skill 安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip)，解压后将完整的 `agent-paper-reader/` 文件夹放入你的 Agent 支持的 Skill 目录。
+需要本页所列多格式功能时，下载 [main 分支源码 ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip)，解压后将完整源码目录放入你的 Agent 支持的 Skill 目录，并命名为 `agent-paper-reader`。
+
+[v0.1.0 精简安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) 是旧版，仅包含 PDF / Markdown 输入能力；它不会因 main 分支更新而自动变化。
 
 本仓库根目录本身也是完整 Skill，入口为 [SKILL.md](SKILL.md)。可以安装完整仓库内容，**不要只复制 SKILL.md**。例如，支持 `.agents/skills` 的项目可以采用：
 
@@ -117,7 +143,7 @@ Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**
 默认不用启动服务，完成后给我 HTML 文件及处理限制说明。
 ```
 
-将路径替换为自己的文件。**工作目录放在 Skill 安装目录之外**，保留原件、处理进度与阅读数据，升级 Skill 时无需重新翻译。
+将路径替换为自己的文件，也可直接使用 `.md`、`.txt`、`.html`、`.docx` 或 `.tex`，指令和工作流程相同。**工作目录放在 Skill 安装目录之外**，保留原件、处理进度与阅读数据，升级 Skill 时无需重新翻译。
 
 ### 3. 打开 HTML，开始读
 
@@ -147,6 +173,7 @@ GitHub 文件预览不会直接运行 HTML，请下载后用浏览器打开。
 <summary>命令入口与工作目录</summary>
 
 ```sh
+python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library doctor
 python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library setup
 python3 /path/to/agent-paper-reader/scripts/paper_reader.py --workspace /path/to/library import /path/to/paper.pdf
 # Agent 按 Skill 完成结构、翻译、对齐和复核后：
