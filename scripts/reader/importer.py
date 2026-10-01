@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 import shutil
 import unicodedata
@@ -770,6 +771,46 @@ def _apply_src_rect(data, box, ext):
         return None
 
 
+def _store_emf_preview(directory, block, blob):
+    """Keep the EMF bytes. Publish PNG/SVG only when fidelity checks pass."""
+    retained = f"image-{block['id']}.emf"
+    (directory / retained).write_bytes(blob)
+    try:
+        from reader.emfconv import convert_emf_preview
+        conversion = convert_emf_preview(blob)
+    except Exception as exc:
+        conversion = {
+            'ok': False, 'svg': None, 'png': None,
+            'record': {'backend': 'emf-gdi-playback', 'ok': False, 'error': str(exc)},
+            'reason': str(exc),
+        }
+    outputs = {'emf': retained}
+    display = None
+    if conversion.get('ok') and conversion.get('png'):
+        display = f"image-{block['id']}.png"
+        (directory / display).write_bytes(conversion['png'])
+        block['asset'] = display
+        outputs['png'] = display
+        if conversion.get('svg'):
+            svg_name = f"image-{block['id']}.svg"
+            (directory / svg_name).write_text(conversion['svg'], encoding='utf-8')
+            outputs['svg'] = svg_name
+    record = dict(conversion.get('record') or {})
+    record['outputs'] = outputs
+    (directory / f"image-{block['id']}.conversion.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2) + '\n', encoding='utf-8',
+    )
+    if display:
+        svg_note = f" and {outputs['svg']}" if outputs.get('svg') else ''
+        resolution = (
+            f'VML EMF preview passed fidelity checks and was converted to {display}{svg_note} '
+            f'by local emf-gdi-playback; original EMF kept as {retained}'
+        )
+        return retained, display, resolution, None
+    why = (conversion.get('reason') or 'conversion failed').replace('\n', ' ')[:240]
+    return retained, None, None, f'EMF preview not converted ({why})'
+
+
 def _try_rasterize_preview(blob, ext):
     if ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
         return blob, ext
@@ -909,27 +950,29 @@ def _import_docx(path, directory, add, issues):
             preview_path = str(preview_part.partname).lstrip('/') if preview_part is not None else None
             ole_path = str(ole_part.partname).lstrip('/') if ole_part is not None else None
             n = 1 + sum(1 for item in issues if str(item.get('id', '')).startswith('docx-ole-'))
-            raster = None
-            raster_ext = None
-            if preview_part is not None:
-                raster, raster_ext = _try_rasterize_preview(
-                    preview_part.blob, Path(str(preview_part.partname)).suffix.lower()
-                )
             label = f'[OLE {prog or "object"}]'
             if preview_path:
                 label += f' preview {preview_path}'
             block = emit(label, 'figure')
             retained = None
-            if raster:
-                name = f"image-{block['id']}{raster_ext}"
-                (directory / name).write_bytes(raster)
-                block['asset'] = name
-                retained = name
-            elif preview_part is not None:
+            display = None
+            resolution = None
+            failure = None
+            if preview_part is not None:
                 ext = Path(str(preview_part.partname)).suffix.lower() or '.bin'
-                name = f"image-{block['id']}{ext}"
-                (directory / name).write_bytes(preview_part.blob)
-                retained = name
+                blob = preview_part.blob
+                if ext == '.emf':
+                    retained, display, resolution, failure = _store_emf_preview(directory, block, blob)
+                else:
+                    raster, raster_ext = _try_rasterize_preview(blob, ext)
+                    if raster:
+                        display = f"image-{block['id']}{raster_ext}"
+                        (directory / display).write_bytes(raster)
+                        block['asset'] = display
+                        retained = display
+                    else:
+                        retained = f"image-{block['id']}{ext}"
+                        (directory / retained).write_bytes(blob)
             parts = [
                 f'Word OLE object ProgID="{prog or "?"}"',
                 f'relationship "{ole_rid or "?"}"' + (f' → {ole_path}' if ole_path else ''),
@@ -937,16 +980,21 @@ def _import_docx(path, directory, add, issues):
                     f' → {preview_path}' if preview_path else ' (missing)'
                 ),
             ]
-            if retained:
+            if display and retained and display != retained:
+                parts.append(f'preview retained as {retained}')
+                parts.append(f'display image {display}')
+            elif retained:
                 parts.append(
-                    f'raster extracted as {retained}' if raster else f'preview retained as {retained}'
+                    f'raster extracted as {retained}' if display else f'preview retained as {retained}'
                 )
             else:
                 parts.append('preview not extracted')
+            if failure:
+                parts.append(failure)
             issues.append({
                 'id': f'docx-ole-{n}',
                 'message': '; '.join(parts),
-                'resolution': None,
+                'resolution': resolution,
             })
 
     def record_unfaithful(math_el):

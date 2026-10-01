@@ -83,7 +83,7 @@ https://github.com/BananaSoldier01/agent-paper-reader
 
 Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**不需要先手动下载、解压或查找文件夹。** 不同 Agent 的安装方式与权限要求可能不同；安装是否成功，以实际检查结果为准。
 
-需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。处理文献时，Agent 还需要具备页面查看能力。
+需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。处理文献时，Agent 还需要具备页面查看能力。Word 里 Word.Picture.8 的 EMF 预览若要显示成图，系统 PATH 上还要有 `rsvg-convert`（包 `librsvg2-bin`）或 `inkscape`，以及 Times New Roman 的字体替代和 OpenSymbol；`doctor` 的 `emf_preview` 会报告是否齐全。没有这些包时原文 EMF 仍会保留，对应问题保持未解决。Word 里 Word.Picture.8 的 EMF 预览若要显示成图，系统 PATH 上还要有 `rsvg-convert`（`librsvg2-bin`）或 `inkscape`，以及 Times New Roman 的字体替代和 OpenSymbol；`doctor` 的 `emf_preview` 会报告是否齐全。没有这些包时原文 EMF 仍会保留，对应问题保持未解决。
 
 <details>
 <summary>手动安装与目录说明（可选）</summary>

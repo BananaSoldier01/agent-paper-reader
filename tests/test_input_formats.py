@@ -1164,3 +1164,142 @@ def test_docx_srcrect_nonzero_crop_applied_or_issued(data_dir):
     assert cropped or issued
     assert all(i['resolution'] is None for i in d['issues'])
 
+
+def _emf_record(typ, payload):
+    import struct
+    return struct.pack('<II', typ, 8 + len(payload)) + payload
+
+
+def _minimal_labeled_emf():
+    """A small valid EMF: one rectangle plus the word Domain. No real paper bytes."""
+    import struct
+    records = []
+    records.append(_emf_record(37, struct.pack('<I', 0x80000004)))
+    records.append(_emf_record(37, struct.pack('<I', 0x80000007)))
+    rect = struct.pack('<iiii', 8, 8, 48, 36)
+    records.append(_emf_record(43, rect + rect))
+    logfont = struct.pack('<iiiii', -28, 0, 0, 0, 400) + bytes(8)
+    name = 'Times New Roman'.encode('utf-16le')
+    name = name + b'\x00' * (64 - len(name))
+    records.append(_emf_record(82, struct.pack('<I', 1) + logfont + name))
+    records.append(_emf_record(37, struct.pack('<I', 1)))
+    records.append(_emf_record(22, struct.pack('<I', 24)))
+    text = 'Domain'.encode('utf-16le')
+    nchars = 6
+    dxs = [22, 16, 24, 16, 10, 16]
+    off_str = 76
+    off_dx = off_str + len(text)
+    body = struct.pack('<iiii', 0, 0, 160, 40)
+    body += struct.pack('<Iff', 1, 1.0, 1.0)
+    body += struct.pack('<iiIII', 60, 55, nchars, off_str, 0)
+    body += struct.pack('<iiii', 60, 30, 180, 60)
+    body += struct.pack('<I', off_dx)
+    assert 8 + len(body) == off_str
+    body += text + struct.pack('<' + 'i' * nchars, *dxs)
+    records.append(_emf_record(84, body))
+    records.append(_emf_record(14, b'\x00' * 12))
+    header_size = 88
+    chunks = b''.join(records)
+    total = header_size + len(chunks)
+    header = struct.pack('<II', 1, header_size)
+    header += struct.pack('<iiii', 0, 0, 200, 80)
+    header += struct.pack('<iiii', 0, 0, 2000, 800)
+    header += struct.pack('<I', 0x464D4520)
+    header += struct.pack('<I', 0x00010000)
+    header += struct.pack('<II', total, 1 + len(records))
+    header += struct.pack('<HH', 2, 0)
+    header += struct.pack('<III', 0, 0, 0)
+    header += struct.pack('<IIII', 1920, 1080, 320, 180)
+    assert len(header) == 88
+    return header + chunks
+
+
+def test_emf_fidelity_rejects_missing_labels_and_stacked_glyphs():
+    """A raster file is not success when the played text is missing or piled up."""
+    import io
+    from PIL import Image
+    from reader.emfconv import EmfPlay, _glyph_fidelity, fidelity_report
+
+    stacked = [{'x': 10, 'y': 40, 'size': 28, 'ch': 'A'} for _ in range(8)]
+    ok, detail = _glyph_fidelity(stacked, (0, 0, 200, 80))
+    assert ok is False and 'overlap' in detail
+
+    play = EmfPlay(b'')
+    play.bounds = (0, 0, 200, 80)
+    play.draw_ops = 4
+    play.text_records = 1
+    play.labels = ['Domain']
+    play.glyphs = [
+        {'x': 20 + i * 18, 'y': 50, 'size': 24, 'ch': ch} for i, ch in enumerate('Domain')
+    ]
+    im = Image.new('RGB', (200, 80), 'white')
+    for x in range(8, 48):
+        for y in range(8, 36):
+            im.putpixel((x, y), (0, 0, 0))
+    buf = io.BytesIO()
+    im.save(buf, format='PNG', compress_level=0)
+    passed, checks = fidelity_report(play, '<svg><rect width="200" height="80"/></svg>', buf.getvalue())
+    assert passed is False
+    names = {item['name']: item['ok'] for item in checks}
+    assert names['labels_in_svg'] is False
+    assert names['png'] is True
+
+
+def test_emf_missing_rasterizer_stays_unresolved(data_dir, monkeypatch):
+    from reader import emfconv
+    from reader.store import folder
+
+    real = emfconv._which
+
+    def hidden(name):
+        if name in ('rsvg-convert', 'inkscape'):
+            return None
+        return real(name)
+
+    monkeypatch.setattr(emfconv, '_which', hidden)
+    p = data_dir / 'ole-ready.docx'
+    _write_ole_docx(p, 'image7.emf', _minimal_labeled_emf())
+    d = import_document(p)
+    issue = next(i for i in d['issues'] if str(i['id']).startswith('docx-ole-'))
+    assert issue['resolution'] is None
+    assert 'not converted' in issue['message']
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure']
+    assert figs and not figs[0].get('asset')
+    directory = folder(d['id'])
+    assert any(directory.glob('image-*.emf'))
+    record = next(directory.glob('image-*.conversion.json')).read_text(encoding='utf-8')
+    assert '"ok": false' in record
+    assert '/usr/' not in record
+
+
+def test_docx_ole_emf_converts_when_environment_is_ready(data_dir):
+    from reader.emfconv import emf_env_status
+    from reader.store import folder
+
+    p = data_dir / 'ole-labeled.docx'
+    blob = _minimal_labeled_emf()
+    _write_ole_docx(p, 'image7.emf', blob)
+    d = import_document(p)
+    issue = next(i for i in d['issues'] if str(i['id']).startswith('docx-ole-'))
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure']
+    assert figs
+    directory = folder(d['id'])
+    emfs = list(directory.glob('image-*.emf'))
+    assert emfs and emfs[0].read_bytes() == blob
+    record_path = next(directory.glob('image-*.conversion.json'))
+    record = record_path.read_text(encoding='utf-8')
+    assert 'emf-gdi-playback' in record
+    assert '/usr/' not in record and 'rId17' in issue['message'] and 'image7.emf' in issue['message']
+    env = emf_env_status()
+    if not env['ready']:
+        assert issue['resolution'] is None
+        assert not figs[0].get('asset')
+        return
+    assert issue['resolution']
+    assert 'fidelity checks' in issue['resolution']
+    assert figs[0]['asset'].endswith('.png')
+    png = (directory / figs[0]['asset']).read_bytes()
+    assert png.startswith(b'\x89PNG')
+    svg = (directory / figs[0]['asset'].replace('.png', '.svg')).read_text(encoding='utf-8')
+    assert 'Domain' in re.sub(r'<[^>]+>', '', svg)
+

@@ -84,7 +84,7 @@ and how to start processing an article.
 
 Your Agent can fetch the repository or release package and check the installation for your environment. **You do not need to download, extract, or locate folders manually first.** Installation methods and permissions vary by host; rely on actual checks to confirm success.
 
-Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. Processing documents also requires the Agent to inspect pages.
+Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. Processing documents also requires the Agent to inspect pages. Displaying a Word.Picture.8 EMF preview also needs `rsvg-convert` (`librsvg2-bin`) or `inkscape` on `PATH`, plus a fontconfig Times New Roman substitute and OpenSymbol. `doctor` reports that under `emf_preview`. Without those packages the original EMF is kept and the issue stays unresolved.
 
 <details>
 <summary>Manual installation and directory layout (optional)</summary>
