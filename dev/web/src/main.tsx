@@ -2,6 +2,7 @@ import React, {useEffect,useLayoutEffect,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
+import {splitMath} from './mathtext.mjs';
 import './style.css';
 
 type Pair={id:string;source:number[][];target:number[][]};
@@ -19,8 +20,8 @@ async function api(path:string,body?:unknown){
  const data=await r.json();if(!r.ok)throw new Error(data.error||'请求失败');return data;
 }
 function MathText({text}:{text:string}){
- const chunks=text.split(/(\$\$[\s\S]*?\$\$|\$[^$\n]+\$)/g);
- return <>{chunks.map((c,i)=>c.startsWith('$')&&c.endsWith('$')?<span key={i} dangerouslySetInnerHTML={{__html:katex.renderToString(c.slice(c.startsWith('$$')?2:1,c.startsWith('$$')?-2:-1),{throwOnError:false,trust:false,displayMode:c.startsWith('$$'),strict:'ignore'})}}/>:<React.Fragment key={i}>{c}</React.Fragment>)}</>;
+ const chunks=splitMath(text);
+ return <>{chunks.map((c,i)=>c.type==='text'?<React.Fragment key={i}>{c.value}</React.Fragment>:<span key={i} dangerouslySetInnerHTML={{__html:katex.renderToString(c.value,{throwOnError:false,trust:false,displayMode:c.type==='display',strict:'ignore'})}}/>)}</>;
 }
 function App(){
  const [doc,setDoc]=useState<Doc|null>(window.__SNAPSHOT__?.document||null),[list,setList]=useState<{id:string;title:string;stage:string}[]>([]);

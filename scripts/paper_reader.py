@@ -31,8 +31,18 @@ def main():
     env = dict(os.environ, PAPER_READER_WORKSPACE=str(workspace), PYTHONDONTWRITEBYTECODE='1',
                PYTHONPYCACHEPREFIX=str(workspace/'.cache/pycache'), PIP_CACHE_DIR=str(workspace/'.cache/pip'))
     if opt.command == 'doctor':
+        emf_preview = {'ready': False, 'missing': ['emf preview check failed to run']}
+        try:
+            if str(SKILL / 'scripts') not in sys.path:
+                sys.path.insert(0, str(SKILL / 'scripts'))
+            from reader.emfconv import emf_env_status
+            emf_preview = emf_env_status()
+        except Exception as exc:
+            emf_preview = {'ready': False, 'missing': [str(exc)]}
+        # emf_preview is informational. PDF-only use stays ready when the venv matches the lock.
         print(json.dumps({'ready': ready, 'workspace': str(workspace), 'python': str(python),
-                          'reader_assets': (SKILL/'assets/reader/index.html').is_file()}, ensure_ascii=False))
+                          'reader_assets': (SKILL/'assets/reader/index.html').is_file(),
+                          'emf_preview': emf_preview}, ensure_ascii=False))
         return 0 if ready else 1
     if opt.command == 'setup':
         workspace.mkdir(parents=True, exist_ok=True)

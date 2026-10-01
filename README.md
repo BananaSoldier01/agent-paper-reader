@@ -15,13 +15,13 @@
 
 一个以 **Skill** 交付的英文文献与文章精读工具。由你当前使用的 Agent 理解全文上下文、翻译、整理术语并复核，生成一份可独立打开的双语 HTML。**默认无需启动服务，也不需要额外配置翻译 API Key。**
 
-第一版面向 **英文文字型 PDF / Markdown → 简体中文**。需要长期管理文献、划线笔记和修订译文时，再开启随包提供的本地文献库。
+第一版面向 **英文原文 → 简体中文**，输入支持文字型 PDF、Markdown、纯文本、本地 HTML、Word (.docx) 与单文件 LaTeX (.tex)。需要长期管理文献、划线笔记和修订译文时，再开启随包提供的本地文献库。
 
 ## 适合读什么
 
 论文、研究报告、技术文档、行业分析和普通英文文章，都可以使用同一套对照阅读流程。处理时保留原文结构，不要求内容具有论文格式。
 
-**当前输入仍为文字型 PDF 或 UTF-8 Markdown。** 网页文章需先提供上述格式的文件；本版不直接抓取网址，不新增 Word、扫描件或其他语言方向。
+**当前输入：** 文字型 PDF、UTF-8 Markdown（.md/.markdown）、纯文本（.txt）、本地 HTML/HTM 存档、Word（.docx）、单文件 LaTeX（.tex）。网页需先保存为本地文件再导入；本版不抓取网址，不做 OCR，不支持 EPUB 或其他语言方向。HTML 是本地存档解析而非站点爬取；TeX 不展开 `\input`/`\include`；DOCX 复杂版式支持有限。
 
 ## 实机演示
 
@@ -83,7 +83,7 @@ https://github.com/BananaSoldier01/agent-paper-reader
 
 Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**不需要先手动下载、解压或查找文件夹。** 不同 Agent 的安装方式与权限要求可能不同；安装是否成功，以实际检查结果为准。
 
-需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。处理文献时，Agent 还需要具备页面查看能力。
+需要 **Python 3.12+**。首次初始化会联网安装独立依赖；日常使用不需要 Node，也不用构建前端。处理文献时，Agent 还需要具备页面查看能力。Word 里 Word.Picture.8 的 EMF 预览若要显示成图，系统 PATH 上还要有 `rsvg-convert`（包 `librsvg2-bin`）或 `inkscape`，以及 Times New Roman 的字体替代和 OpenSymbol；`doctor` 的 `emf_preview` 会报告是否齐全。没有这些包时原文 EMF 仍会保留，对应问题保持未解决。Word 里 Word.Picture.8 的 EMF 预览若要显示成图，系统 PATH 上还要有 `rsvg-convert`（`librsvg2-bin`）或 `inkscape`，以及 Times New Roman 的字体替代和 OpenSymbol；`doctor` 的 `emf_preview` 会报告是否齐全。没有这些包时原文 EMF 仍会保留，对应问题保持未解决。
 
 <details>
 <summary>手动安装与目录说明（可选）</summary>
@@ -161,7 +161,7 @@ Windows 可用 `py -3.12` 替代 `python3`，但 Windows 尚未实测。工作�
 
 ## 当前边界
 
-- **输入**：文字型 PDF、UTF-8 Markdown；无 OCR。更多格式和自定义语言留待后续维护。
+- **输入**：文字型 PDF、UTF-8 Markdown、纯文本、本地 HTML/HTM、Word (.docx)、单文件 LaTeX (.tex)；无 OCR、无 EPUB、无 URL 抓取。自定义语言方向留待后续维护。
 - **翻译**：使用当前 Agent 的模型与额度，不等于免费或离线推理。长文需要分批处理；复杂版式必须查看原页。
 - **质量**：完整性检查不能替代语义复核，也不证明原文观点或结论正确。原图文字、公式和参考文献的处理范围需在交付中说明。
 - **分享**：HTML 可能包含原页图像、已有笔记及修订历史，体积可能较大；分享前确认内容。

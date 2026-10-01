@@ -1,6 +1,6 @@
 ---
 name: agent-paper-reader
-description: 将英文文字型 PDF 或 Markdown 文献与文章制作成简体中文对照的离线精读 HTML。适用于论文、报告、技术文档和普通文章的翻译与精读、上下文术语解释、处理中断后续做和重新导出；用户需要时，也可启动配套本地文献库进行阅读、修订和笔记。
+description: 将英文文字型 PDF、Markdown、纯文本、本地 HTML、Word (.docx) 或单文件 LaTeX (.tex) 文献与文章制作成简体中文对照的离线精读 HTML。适用于论文、报告、技术文档和普通文章的翻译与精读、上下文术语解释、处理中断后续做和重新导出；用户需要时，也可启动配套本地文献库进行阅读、修订和笔记。
 ---
 
 # Agent 文献译读
@@ -14,7 +14,7 @@ description: 将英文文字型 PDF 或 Markdown 文献与文章制作成简体�
 - **重新导出**：检查当前版本；需要复核时先完成复核，不重复翻译已完成内容。
 - **管理、修订或笔记**：仅此时读取 [本地文献库](references/library.md) 并按需启动服务。
 
-本版面向英文原文→简体中文，适用于论文、报告、技术文档和普通文章，输入为文字型 PDF 或 UTF-8 Markdown。网页文章须先由用户提供上述格式的文件，本 Skill 不直接抓取 URL。用户要求其他格式、语言方向或扫描件时，说明当前范围，不把临时转换或模型能读懂等同于已支持。无法辨认的正文、乱码和缺图不能标记为已解决。
+本版面向英文原文→简体中文，适用于论文、报告、技术文档和普通文章。支持输入：文字型 PDF、UTF-8 Markdown（.md/.markdown）、纯文本（.txt）、本地 HTML/HTM 存档、Word（.docx）、单文件 LaTeX（.tex）。HTML 仅解析本地文件，不抓取远程 URL 或远程图；MathML 只写入一种正文表示。TeX 不展开 \input/\include，也不做完整编译；`\verb` 内命令不触发结构解析；导言区排版宏不进入正文，但 `\title`/`\author` 等元数据会保留。元数据花括号或可选参数未闭合时记 unresolved issue 并继续，不会停住。DOCX 普通正文保留行内 oMath 与 run 上下标顺序，`oMathPara` 内每个 `oMath` 按顺序保留为续行；`m:bar` 区分上划线与下划线。文本框、页眉页脚和一般 OLE 嵌入支持有限。Word.Picture.8 的 VML EMF 预览用本地 GDI 回放转成 PNG 和 SVG：工具从 PATH 发现（rsvg-convert 或 inkscape），并需要 fontconfig 能匹配 Times New Roman（fonts-liberation 或 fonts-croscore）和 OpenSymbol（fonts-opensymbol）。保真检查通过才把图挂到图块并记录处理结果；缺工具、转换失败或结果不可靠时保留原始 EMF，issue 的 resolution 保持空。不做在线转换，也不用作者 PDF 里的图代替。`doctor` 的 `emf_preview` 只报告这项是否齐全，缺少这些系统包不会让纯 PDF 环境失败。不支持 EPUB、OCR 扫描件或其他语言方向。用户要求超出范围的格式时说明当前能力，不把临时转换或模型能读懂等同于已支持。无法辨认的正文、乱码和缺图不能标记为已解决。
 
 ## 定位运行环境
 

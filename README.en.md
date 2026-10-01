@@ -13,7 +13,7 @@
 
 ![Offline bilingual reader with an outline, aligned paragraphs, and contextual glossary](docs/media/bilingual-reader.png)
 
-A **Skill** that turns an English text-based PDF or Markdown document or article into a self-contained bilingual HTML reader. Your current Agent reads the context, translates, organizes terminology, and reviews the result. **No local server is required by default, and no separate translation API key is needed.**
+A **Skill** that turns an English document or article (text PDF, Markdown, plain text, local HTML, Word `.docx`, or single-file LaTeX `.tex`) into a self-contained bilingual HTML reader. Your current Agent reads the context, translates, organizes terminology, and reviews the result. **No local server is required by default, and no separate translation API key is needed.**
 
 Version 1 supports **English → Simplified Chinese**. An optional local library adds multi-document management, saved annotations, and translation revisions. Skill instructions and reference guides are currently in Chinese.
 
@@ -21,7 +21,7 @@ Version 1 supports **English → Simplified Chinese**. An optional local library
 
 Research papers, reports, technical documentation, industry analysis, and ordinary English articles use the same reading workflow. Preserve the source structure; an article does not need an academic format.
 
-**Inputs remain text-based PDF or UTF-8 Markdown.** Provide web articles as files in one of these formats. Direct URL fetching, Word files, scanned documents, and other language directions are outside this version.
+**Supported inputs:** text-based PDF, UTF-8 Markdown (`.md`/`.markdown`), plain text (`.txt`), local HTML/HTM archives, Word (`.docx`), and single-file LaTeX (`.tex`). Provide web articles as local files first. This version does not fetch URLs, run OCR, or accept EPUB or other language directions. HTML means local archive parsing (not site crawling); TeX does not expand `\input`/`\include`; complex DOCX layouts have limited support.
 
 ## See it in action
 
@@ -84,7 +84,7 @@ and how to start processing an article.
 
 Your Agent can fetch the repository or release package and check the installation for your environment. **You do not need to download, extract, or locate folders manually first.** Installation methods and permissions vary by host; rely on actual checks to confirm success.
 
-Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. Processing documents also requires the Agent to inspect pages.
+Requires **Python 3.12+**. Initial setup downloads isolated dependencies. Normal use needs neither Node nor a frontend build. Processing documents also requires the Agent to inspect pages. Displaying a Word.Picture.8 EMF preview also needs `rsvg-convert` (`librsvg2-bin`) or `inkscape` on `PATH`, plus a fontconfig Times New Roman substitute and OpenSymbol. `doctor` reports that under `emf_preview`. Without those packages the original EMF is kept and the issue stays unresolved.
 
 <details>
 <summary>Manual installation and directory layout (optional)</summary>
@@ -163,7 +163,7 @@ Windows can use `py -3.12`, but has not been tested. The workspace contains `dat
 
 ## Current limits
 
-- Text-based PDF and UTF-8 Markdown only; no OCR. More input formats and configurable languages are future work.
+- Text-based PDF, UTF-8 Markdown, plain text, local HTML/HTM, Word (`.docx`), and single-file LaTeX (`.tex`); no OCR, EPUB, or URL fetching. Configurable language directions remain future work.
 - Uses the host Agent's model and allowance; this does not imply free or offline inference. Long documents require batches, and complex layouts require visual inspection.
 - Structural validation does not replace semantic review or validate the original author's claims. Processing limitations for figure text, equations, and references must be reported.
 - Exports may include source-page images, notes, and revision history. Check contents before sharing; files can be large.
