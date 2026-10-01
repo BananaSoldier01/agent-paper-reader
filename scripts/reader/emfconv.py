@@ -75,6 +75,32 @@ _IGNORABLE_RECORDS = frozenset({
 # no source bits as a no-op; it must not be treated as missing picture content.
 _BITBLT_NOP_ROP = 0x00AA0029
 
+# MS-EMF drawing records that share one header (Bounds + Count + aPoints) but
+# not one point width. PointL is signed 32-bit (8 bytes); PointS is signed
+# 16-bit (4 bytes). close, bezier, and to-current-position stay per family.
+# (close, bezier, to, wide)
+_POLY_KIND = {
+    2: (False, True, False, True),    # POLYBEZIER
+    85: (False, True, False, False),   # POLYBEZIER16
+    3: (True, False, False, True),     # POLYGON
+    86: (True, False, False, False),    # POLYGON16
+    4: (False, False, False, True),    # POLYLINE
+    87: (False, False, False, False),   # POLYLINE16
+    5: (False, True, True, True),      # POLYBEZIERTO
+    88: (False, True, True, False),     # POLYBEZIERTO16
+    6: (False, False, True, True),     # POLYLINETO
+    89: (False, False, True, False),    # POLYLINETO16
+}
+_POLY_NAME = {
+    2: 'POLYBEZIER', 85: 'POLYBEZIER16',
+    3: 'POLYGON', 86: 'POLYGON16',
+    4: 'POLYLINE', 87: 'POLYLINE16',
+    5: 'POLYBEZIERTO', 88: 'POLYBEZIERTO16',
+    6: 'POLYLINETO', 89: 'POLYLINETO16',
+}
+# EMR_POLYLINE allows at most 16K points. A larger count is not drawn in part.
+_POLY_MAX_POINTS = 16384
+
 # fc-match always returns some face. Only these families prove the requested coverage.
 _TIMES_FAMILIES = frozenset({
     'times new roman', 'times', 'liberation serif', 'tinos',
@@ -422,16 +448,38 @@ class EmfPlay:
             self.font = obj
 
     def _points16(self, off: int, count: int) -> list[tuple[float, float]]:
+        return self._read_points(off, count, wide=False)
+
+    def _read_points(self, off: int, count: int, wide: bool) -> list[tuple[float, float]]:
+        fmt = '<ii' if wide else '<hh'
+        stride = 8 if wide else 4
         pts = []
         for i in range(count):
-            x, y = struct.unpack_from('<hh', self.data, off + i * 4)
+            x, y = struct.unpack_from(fmt, self.data, off + i * stride)
             pts.append((float(x), float(y)))
         return pts
 
-    def _poly(self, off: int, close: bool, bezier: bool, to: bool):
-        # Bounds at off+8 (16 bytes), count at off+24.
+    def _poly(self, off: int, size: int, close: bool, bezier: bool, to: bool, wide: bool, name: str):
+        # Header is Type+Size+Bounds(RectL, 16)+Count. aPoints follow at +28.
+        # Word previews leave aPoints outside that rectangle, so only its presence is required.
+        if size < 28 or off + 28 > len(self.data):
+            self.errors.append(f'truncated EMR_{name} (size {size})')
+            return
         count = struct.unpack_from('<I', self.data, off + 24)[0]
-        pts = self._points16(off + 28, count)
+        if count > _POLY_MAX_POINTS:
+            self.errors.append(f'EMR_{name} point count {count} exceeds {_POLY_MAX_POINTS}')
+            return
+        stride = 8 if wide else 4
+        need = 28 + count * stride
+        if size < need or off + need > len(self.data):
+            self.errors.append(f'truncated EMR_{name} (size {size}, count {count})')
+            return
+        if bezier and count:
+            complete = (count % 3 == 0) if to else (count >= 4 and (count - 1) % 3 == 0)
+            if not complete:
+                self.errors.append(f'EMR_{name} point count {count} is incomplete')
+                return
+        pts = self._read_points(off + 28, count, wide)
         if not pts:
             return
         if bezier:
@@ -675,16 +723,9 @@ class EmfPlay:
             self._draw_path(True, True)
         elif typ == 64:  # STROKEPATH
             self._draw_path(False, True)
-        elif typ in (4, 87):  # POLYLINE / POLYLINE16
-            self._poly(off, close=False, bezier=False, to=False)
-        elif typ in (6, 89):  # POLYLINETO16
-            self._poly(off, close=False, bezier=False, to=True)
-        elif typ in (3, 86):  # POLYGON16
-            self._poly(off, close=True, bezier=False, to=False)
-        elif typ in (2, 85):  # POLYBEZIER16
-            self._poly(off, close=False, bezier=True, to=False)
-        elif typ in (5, 88):  # POLYBEZIERTO16
-            self._poly(off, close=False, bezier=True, to=True)
+        elif typ in _POLY_KIND:
+            close, bezier, to, wide = _POLY_KIND[typ]
+            self._poly(off, size, close=close, bezier=bezier, to=to, wide=wide, name=_POLY_NAME[typ])
         elif typ == 8:  # POLYPOLYGON
             self._polypoly(off, close=True)
         elif typ == 7:

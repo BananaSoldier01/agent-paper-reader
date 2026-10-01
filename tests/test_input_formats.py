@@ -1349,6 +1349,128 @@ def test_standard_emf_rectangle_and_ellipse_are_drawn():
     assert 'C ' in esvg
 
 
+def _emf_poly_record(typ, points):
+    """Bounds + Count + aPoints. PointL for types 2–6, PointS for the 16-bit siblings."""
+    import struct
+    wide = typ in (2, 3, 4, 5, 6)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    payload = struct.pack('<iiii', min(xs), min(ys), max(xs), max(ys))
+    payload += struct.pack('<I', len(points))
+    fmt = '<ii' if wide else '<hh'
+    payload += b''.join(struct.pack(fmt, x, y) for x, y in points)
+    return _emf_record(typ, payload)
+
+
+def test_emf_poly_families_keep_32_and_16_bit_coordinates(data_dir):
+    """PointL and PointS siblings of the same geometry must emit the same path."""
+    import struct
+    from reader.emfconv import convert_emf_preview, emf_env_status, render_emf_svg
+    from reader.store import folder
+
+    families = (
+        ('POLYLINE', 4, 87, ((10, 10), (190, 70)), None,
+         'M 10.00 10.00 L 190.00 70.00'),
+        ('POLYGON', 3, 86, ((10, 10), (190, 10), (100, 70)), None,
+         'M 10.00 10.00 L 190.00 10.00 L 100.00 70.00 Z'),
+        ('POLYBEZIER', 2, 85, ((10, 10), (40, 70), (160, 70), (190, 10)), None,
+         'M 10.00 10.00 C 40.00 70.00 160.00 70.00 190.00 10.00'),
+        ('POLYLINETO', 6, 89, ((190, 70),), (10, 10),
+         'M 10.00 10.00 L 190.00 70.00'),
+        ('POLYBEZIERTO', 5, 88, ((40, 70), (160, 70), (190, 10)), (10, 10),
+         'M 10.00 10.00 C 40.00 70.00 160.00 70.00 190.00 10.00'),
+    )
+    for name, wide_typ, narrow_typ, points, moveto, expect in families:
+        paths = {}
+        for typ in (wide_typ, narrow_typ):
+            shapes = []
+            if moveto is not None:
+                shapes.append(_emf_record(27, struct.pack('<ii', moveto[0], moveto[1])))
+            shapes.append(_emf_poly_record(typ, points))
+            play, svg = render_emf_svg(_minimal_labeled_emf(shapes))
+            assert play is not None and svg is not None, name
+            assert play.errors == [], (name, typ, play.errors)
+            found = re.findall(r'<path d="([^"]*)"', svg)
+            assert found == [expect], (name, typ, found)
+            assert 'Domain' in re.sub(r'<[^>]+>', '', svg)
+            paths[typ] = found
+        assert paths[wide_typ] == paths[narrow_typ], name
+
+    # A coordinate outside int16 must survive as PointL. The old 16-bit read of
+    # (10, 10) → (40000, -70) collapsed to M 10.00 0.00 L 10.00 0.00.
+    wide_only = ((10, 10), (40000, -70))
+    play, svg = render_emf_svg(_minimal_labeled_emf([_emf_poly_record(4, wide_only)]))
+    assert play is not None and svg is not None and play.errors == []
+    assert re.findall(r'<path d="([^"]*)"', svg) == ['M 10.00 10.00 L 40000.00 -70.00']
+
+    line = _minimal_labeled_emf([_emf_poly_record(4, ((10, 10), (190, 70)))])
+    result = convert_emf_preview(line)
+    env = emf_env_status()
+    if env['ready']:
+        assert result['ok'] is True
+        assert 'M 10.00 10.00 L 190.00 70.00' in result['svg']
+        p = data_dir / 'ole-polyline32.docx'
+        _write_ole_docx(p, 'image7.emf', line)
+        d = import_document(p)
+        issue = next(i for i in d['issues'] if str(i['id']).startswith('docx-ole-'))
+        figs = [b for b in d['blocks'] if b['kind'] == 'figure']
+        assert issue['resolution'] and 'fidelity checks' in issue['resolution']
+        assert figs and figs[0].get('asset', '').endswith('.png')
+        directory = folder(d['id'])
+        svg = (directory / figs[0]['asset'].replace('.png', '.svg')).read_text(encoding='utf-8')
+        assert 'M 10.00 10.00 L 190.00 70.00' in svg
+    else:
+        assert result['ok'] is False
+
+
+def test_emf_poly_truncated_or_incomplete_stays_unresolved(data_dir):
+    """A short PointL payload must not be re-read as PointS and auto-resolved."""
+    import struct
+    from reader.emfconv import convert_emf_preview, render_emf_svg
+    from reader.store import folder
+
+    # Count says two PointL points (16 bytes) but only the first point is stored.
+    # Those 8 bytes are a legal PointS pair, which is how the old parser succeeded.
+    payload = struct.pack('<iiiiI', 10, 10, 190, 70, 2) + struct.pack('<ii', 10, 10)
+    short = _emf_record(4, payload)
+    assert len(short) == 36
+    blob = _minimal_labeled_emf([short])
+    play, svg = render_emf_svg(blob)
+    assert play is not None and svg is None
+    assert any('truncated' in err and 'POLYLINE' in err and 'count 2' in err for err in play.errors)
+    assert convert_emf_preview(blob)['ok'] is False
+
+    # Header shorter than Bounds + Count.
+    tiny = _minimal_labeled_emf([_emf_record(87, struct.pack('<iii', 0, 0, 1))])
+    tplay, tsvg = render_emf_svg(tiny)
+    assert tplay is not None and tsvg is None
+    assert any('truncated' in err and 'POLYLINE16' in err for err in tplay.errors)
+
+    # Two PointL values do not make a cubic (need 1+3n). Bytes are complete.
+    partial = _minimal_labeled_emf([_emf_poly_record(2, ((10, 10), (190, 70)))])
+    pplay, psvg = render_emf_svg(partial)
+    assert pplay is not None and psvg is None
+    assert any('incomplete' in err and 'POLYBEZIER' in err for err in pplay.errors)
+    assert convert_emf_preview(partial)['ok'] is False
+
+    huge = struct.pack('<iiiiI', 0, 0, 1, 1, 20000) + struct.pack('<ii', 1, 1)
+    hplay, hsvg = render_emf_svg(_minimal_labeled_emf([_emf_record(4, huge)]))
+    assert hplay is not None and hsvg is None
+    assert any('exceeds' in err and 'POLYLINE' in err for err in hplay.errors)
+
+    p = data_dir / 'ole-polyline32-trunc.docx'
+    _write_ole_docx(p, 'image7.emf', blob)
+    d = import_document(p)
+    issue = next(i for i in d['issues'] if str(i['id']).startswith('docx-ole-'))
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure']
+    assert figs and not figs[0].get('asset')
+    assert issue['resolution'] is None
+    directory = folder(d['id'])
+    record = next(directory.glob('image-*.conversion.json')).read_text(encoding='utf-8')
+    assert '"ok": false' in record
+    assert 'truncated' in record
+
+
 def test_emf_unsupported_drawing_does_not_auto_resolve(data_dir):
     """A skipped or unsupported drawing record must not auto-resolve just because text remains."""
     import struct
