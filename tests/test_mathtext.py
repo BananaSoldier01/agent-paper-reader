@@ -86,6 +86,71 @@ def test_real_inline_and_display_math():
     assert joined('$$h(p)=1$$') == '$$h(p)=1$$'
 
 
+def test_inline_close_accepts_dollar_before_digit():
+    """A closer is kept even if the next char is a digit; currency stays prose."""
+    assert split_math('$n=$512') == [
+        {'type': 'inline', 'value': 'n='},
+        {'type': 'text', 'value': '512'},
+    ]
+    assert split_math('38²$=$1,444') == [
+        {'type': 'text', 'value': '38²'},
+        {'type': 'inline', 'value': '='},
+        {'type': 'text', 'value': '1,444'},
+    ]
+    assert split_math('$b=$3') == [
+        {'type': 'inline', 'value': 'b='},
+        {'type': 'text', 'value': '3'},
+    ]
+    swallowed = '2⁸$=$256. Therefore we let $\\Phi$'
+    swallowed_parts = split_math(swallowed)
+    assert swallowed_parts == [
+        {'type': 'text', 'value': '2⁸'},
+        {'type': 'inline', 'value': '='},
+        {'type': 'text', 'value': '256. Therefore we let '},
+        {'type': 'inline', 'value': '\\Phi'},
+    ]
+    assert not any(
+        p['type'] != 'text' and 'Therefore' in p['value'] for p in swallowed_parts
+    )
+    arrow = split_math(r'1$\rightarrow$2')
+    assert arrow == [
+        {'type': 'text', 'value': '1'},
+        {'type': 'inline', 'value': '\\rightarrow'},
+        {'type': 'text', 'value': '2'},
+    ]
+
+    pixels = split_math('$n=$1381 pixels in 128² image | Hash table $H$')
+    assert pixels[0] == {'type': 'inline', 'value': 'n='}
+    assert pixels[1] == {'type': 'text', 'value': '1381 pixels in 128² image | Hash table '}
+    assert pixels[2] == {'type': 'inline', 'value': 'H'}
+    density = split_math(
+        r'For $\bar{u}=$64K.  Such position tags are more concise than a domain bit image '
+        r'if the data density $\rho =n/u<1/(16d)$'
+    )
+    assert density[1] == {'type': 'inline', 'value': r'\bar{u}='}
+    assert density[2]['type'] == 'text' and density[2]['value'].startswith('64K.')
+    assert 'position tags' in density[2]['value']
+    assert density[3] == {'type': 'inline', 'value': r'\rho =n/u<1/(16d)'}
+    combo = split_math(
+        r'hash $m∼$256² and our default choice $K=R=$2⁸, this probability is near 100% '
+        r'if the data density is greater than $\rho \approx m/u∼1/800$'
+    )
+    types_values = [(p['type'], p['value']) for p in combo]
+    assert ('inline', 'm∼') in types_values
+    assert ('inline', 'K=R=') in types_values
+    assert any(p['type'] == 'text' and 'this probability' in p['value'] for p in combo)
+    assert not any(p['type'] != 'text' and 'this probability' in p['value'] for p in combo)
+    assert combo[-1]['type'] == 'inline' and r'\rho' in combo[-1]['value']
+
+    journal = 'spend $30, $50, or even $100 to prepare an article'
+    assert split_math(journal) == [{'type': 'text', 'value': journal}]
+    cloud = (
+        'At an average of $0.015 per article on Google Cloud, '
+        'it would cost $30,000 every time we wanted to reconvert the entire arXiv corpus.'
+    )
+    assert split_math(cloud) == [{'type': 'text', 'value': cloud}]
+
+
 def test_shipped_reader_does_not_use_greedy_dollar_split():
     assets = ROOT / 'assets' / 'reader' / 'assets'
     bundles = sorted(assets.glob('index-*.js'))

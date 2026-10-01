@@ -268,6 +268,8 @@ def _omml_convert(el, flags):
             return ''
         return ''.join(_omml_convert(c, flags) for c in el)
     if loc == 'r':
+        if _run_is_hidden(el):
+            return ''
         text = ''.join((c.text or '') for c in el if _xml_local(c.tag) == 't')
         rPr = _omml_first(el, 'rPr')
         nor = False
@@ -679,6 +681,112 @@ def _symbol_font_byte(code):
     return None
 
 
+def _word_on_off_enabled(el):
+    """ST_OnOff: present with no val / true / on / 1 is on; 0 / false / off is off."""
+    if el is None:
+        return False
+    val = _xml_attr(el, 'val')
+    if val is None or str(val).strip() == '':
+        return True
+    return str(val).strip().lower() not in ('0', 'false', 'off')
+
+
+def _rpr_hidden(rPr):
+    if rPr is None:
+        return False
+    for child in rPr.iter():
+        loc = _xml_local(child.tag)
+        if loc in ('vanish', 'specVanish', 'webHidden') and _word_on_off_enabled(child):
+            return True
+    return False
+
+
+def _run_is_hidden(run_el):
+    """Effective vanish/hidden on a w:r or m:r, including explicit vanish=0/false/off."""
+    for child in run_el:
+        if _xml_local(child.tag) == 'rPr' and _rpr_hidden(child):
+            return True
+    return False
+
+
+def _src_rect_box(blip):
+    parent = blip.getparent() if blip is not None else None
+    if parent is None:
+        return None
+    rect = None
+    for child in parent:
+        if _xml_local(child.tag) == 'srcRect':
+            rect = child
+            break
+    if rect is None:
+        return None
+
+    def pct(name):
+        raw = _xml_attr(rect, name)
+        if raw is None or str(raw).strip() == '':
+            return 0
+        try:
+            return int(str(raw).strip())
+        except ValueError:
+            return 0
+
+    box = (pct('l'), pct('t'), pct('r'), pct('b'))
+    if box == (0, 0, 0, 0):
+        return None
+    return box
+
+
+def _apply_src_rect(data, box, ext):
+    """Crop DrawingML srcRect (values are 1000ths of a percent). None if it cannot be applied."""
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(data))
+        im.load()
+    except Exception:
+        return None
+    width, height = im.size
+    if width <= 0 or height <= 0:
+        return None
+    left_p, top_p, right_p, bottom_p = box
+    left = int(round(width * left_p / 100000.0))
+    top = int(round(height * top_p / 100000.0))
+    right = int(round(width * (1.0 - right_p / 100000.0)))
+    bottom = int(round(height * (1.0 - bottom_p / 100000.0)))
+    left = max(0, min(left, width - 1))
+    top = max(0, min(top, height - 1))
+    right = max(left + 1, min(right, width))
+    bottom = max(top + 1, min(bottom, height))
+    im = im.crop((left, top, right, bottom))
+    fmt = {'.jpg': 'JPEG', '.jpeg': 'JPEG', '.gif': 'GIF', '.webp': 'WEBP'}.get(ext, 'PNG')
+    if fmt == 'JPEG' and im.mode not in ('RGB', 'L'):
+        im = im.convert('RGB')
+    try:
+        import io
+        out = io.BytesIO()
+        im.save(out, format=fmt)
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+def _try_rasterize_preview(blob, ext):
+    if ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif'):
+        return blob, ext
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(blob))
+        im.load()
+        if im.mode not in ('RGB', 'RGBA', 'L', 'P'):
+            im = im.convert('RGB')
+        out = io.BytesIO()
+        im.save(out, format='PNG')
+        return out.getvalue(), '.png'
+    except Exception:
+        return None, ext
+
+
 def _word_symbol_text(el, issues):
     """Map a w:sym, or keep a visible token and an unresolved issue."""
     font = (_xml_attr(el, 'font') or '').strip()
@@ -755,11 +863,91 @@ def _import_docx(path, directory, add, issues):
                     ext = '.gif'
                 else:
                     ext = '.png'
+            data = part.blob
+            crop = _src_rect_box(blip)
+            if crop is not None:
+                cropped = _apply_src_rect(data, crop, ext)
+                if cropped is not None:
+                    data = cropped
+                else:
+                    n = 1 + sum(1 for item in issues if str(item.get('id', '')).startswith('docx-crop-'))
+                    issues.append({
+                        'id': f'docx-crop-{n}',
+                        'message': (
+                            f'Word drawing a:srcRect crop l={crop[0]} t={crop[1]} r={crop[2]} b={crop[3]} '
+                            f'on relationship "{rid}" was not applied; original image saved'
+                        ),
+                        'resolution': None,
+                    })
             label = '[image]'
             block = emit(label, 'figure')
             name = f"image-{block['id']}{ext}"
-            (directory / name).write_bytes(part.blob)
+            (directory / name).write_bytes(data)
             block['asset'] = name
+
+    def emit_objects(objs):
+        seen = set()
+        related = document.part.related_parts
+        for obj in objs:
+            ole_el = None
+            preview_el = None
+            for child in obj.iter():
+                loc = _xml_local(child.tag)
+                if loc == 'OLEObject' and ole_el is None:
+                    ole_el = child
+                elif loc == 'imagedata' and preview_el is None:
+                    preview_el = child
+            ole_rid = _xml_attr(ole_el, 'id') if ole_el is not None else None
+            prog = _xml_attr(ole_el, 'ProgID') if ole_el is not None else None
+            preview_rid = _xml_attr(preview_el, 'id') if preview_el is not None else None
+            key = (ole_rid, preview_rid, id(obj))
+            if key in seen:
+                continue
+            seen.add(key)
+            preview_part = related[preview_rid] if preview_rid and preview_rid in related else None
+            ole_part = related[ole_rid] if ole_rid and ole_rid in related else None
+            preview_path = str(preview_part.partname).lstrip('/') if preview_part is not None else None
+            ole_path = str(ole_part.partname).lstrip('/') if ole_part is not None else None
+            n = 1 + sum(1 for item in issues if str(item.get('id', '')).startswith('docx-ole-'))
+            raster = None
+            raster_ext = None
+            if preview_part is not None:
+                raster, raster_ext = _try_rasterize_preview(
+                    preview_part.blob, Path(str(preview_part.partname)).suffix.lower()
+                )
+            label = f'[OLE {prog or "object"}]'
+            if preview_path:
+                label += f' preview {preview_path}'
+            block = emit(label, 'figure')
+            retained = None
+            if raster:
+                name = f"image-{block['id']}{raster_ext}"
+                (directory / name).write_bytes(raster)
+                block['asset'] = name
+                retained = name
+            elif preview_part is not None:
+                ext = Path(str(preview_part.partname)).suffix.lower() or '.bin'
+                name = f"image-{block['id']}{ext}"
+                (directory / name).write_bytes(preview_part.blob)
+                retained = name
+            parts = [
+                f'Word OLE object ProgID="{prog or "?"}"',
+                f'relationship "{ole_rid or "?"}"' + (f' → {ole_path}' if ole_path else ''),
+                f'VML preview relationship "{preview_rid or "?"}"' + (
+                    f' → {preview_path}' if preview_path else ' (missing)'
+                ),
+            ]
+            if retained:
+                parts.append(
+                    f'raster extracted as {retained}' if raster else f'preview retained as {retained}'
+                )
+            else:
+                parts.append('preview not extracted')
+            issues.append({
+                'id': f'docx-ole-{n}',
+                'message': '; '.join(parts),
+                'resolution': None,
+            })
 
     def record_unfaithful(math_el):
         issues.append({
@@ -772,8 +960,11 @@ def _import_docx(path, directory, add, issues):
             'resolution': None,
         })
 
-    def handle_run(run_el, pieces, blips):
+    def handle_run(run_el, pieces, blips, ole_items):
         blips.extend(run_el.findall(f'.//{{{A_NS}}}blip'))
+        ole_items.extend(run_el.findall(f'.//{{{W_NS}}}object'))
+        if _run_is_hidden(run_el):
+            return
         vert = None
         rPr = run_el.find(f'{{{W_NS}}}rPr')
         if rPr is not None:
@@ -797,12 +988,12 @@ def _import_docx(path, directory, add, issues):
         else:
             pieces.append(raw)
 
-    def walk_inlines(el, pieces, blips, unfaithful):
+    def walk_inlines(el, pieces, blips, unfaithful, ole_items):
         for child in el.iterchildren():
             loc = _xml_local(child.tag)
             ns = child.tag.rsplit('}', 1)[0][1:] if '}' in child.tag else ''
             if loc == 'r' and ns == W_NS:
-                handle_run(child, pieces, blips)
+                handle_run(child, pieces, blips, ole_items)
             elif loc == 'oMath':
                 latex, faithful = _omml_to_latex(child)
                 pieces.append(_wrap_math(latex, display=False))
@@ -832,21 +1023,25 @@ def _import_docx(path, directory, add, issues):
             elif loc == 'del':
                 continue
             elif loc in WRAPPERS:
-                walk_inlines(child, pieces, blips, unfaithful)
+                walk_inlines(child, pieces, blips, unfaithful, ole_items)
             elif loc in ('drawing', 'pict', 'object'):
                 blips.extend(child.findall(f'.//{{{A_NS}}}blip'))
+                if loc == 'object':
+                    ole_items.append(child)
+                else:
+                    ole_items.extend(child.findall(f'.//{{{W_NS}}}object'))
             else:
                 if loc in ('pPr', 'bookmarkStart', 'bookmarkEnd', 'proofErr', 'commentRangeStart',
                            'commentRangeEnd', 'commentReference'):
                     continue
-                walk_inlines(child, pieces, blips, unfaithful)
+                walk_inlines(child, pieces, blips, unfaithful, ole_items)
 
     def paragraph_content(p_el):
-        pieces, blips, unfaithful = [], [], []
-        walk_inlines(p_el, pieces, blips, unfaithful)
+        pieces, blips, unfaithful, ole_items = [], [], [], []
+        walk_inlines(p_el, pieces, blips, unfaithful, ole_items)
         value = ''.join(pieces)
         value = re.sub(r'[ \t]+\n', '\n', value).strip()
-        return value, blips, unfaithful
+        return value, blips, unfaithful, ole_items
 
     body = document.element.body
     for child in body.iterchildren():
@@ -855,13 +1050,14 @@ def _import_docx(path, directory, add, issues):
             para = Paragraph(child, document)
             style = (para.style.name if para.style is not None else '') or ''
             heading = bool(re.match(r'Heading\s*[1-6]$', style, re.I) or style.lower().startswith('heading'))
-            value, blips, unfaithful = paragraph_content(child)
+            value, blips, unfaithful, ole_items = paragraph_content(child)
             if value:
                 kind = 'heading' if heading else ('formula' if _math_only_text(value) else 'paragraph')
                 emit(value, kind)
             for math_el in unfaithful:
                 record_unfaithful(math_el)
             emit_blips(blips)
+            emit_objects(ole_items)
         elif tag == qn('w:tbl'):
             table = Table(child, document)
             rows = []
@@ -879,7 +1075,7 @@ def _import_docx(path, directory, add, issues):
                 for cell in cell_iter:
                     cell_parts = []
                     for para in cell.paragraphs:
-                        value, _, unfaithful = paragraph_content(para._p)
+                        value, _, unfaithful, _ = paragraph_content(para._p)
                         if value:
                             cell_parts.append(value)
                         table_unfaithful.extend(unfaithful)
@@ -891,8 +1087,9 @@ def _import_docx(path, directory, add, issues):
             for math_el in table_unfaithful:
                 record_unfaithful(math_el)
             emit_blips(child.findall(f'.//{{{A_NS}}}blip'))
+            emit_objects(child.findall(f'.//{{{W_NS}}}object'))
 
-    # Headers/footers, text boxes, OLE, tracked changes are out of scope for this batch.
+    # Headers/footers, text boxes, and tracked changes are out of scope for this batch.
 
 
 def _tex_control_word(src, i):

@@ -935,3 +935,232 @@ def test_docx_symbol_font_multiply_keeps_scripts(data_dir):
     assert 'F0E6' in blob
     assert not any('F0B1' in i['message'] or 'F0A5' in i['message'] for i in sym_issues)
 
+
+W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+
+def test_docx_vanish_hidden_run_omitted_from_formula(data_dir):
+    """Hidden w:vanish runs (including OMML) are omitted; vanish=0/false/off stays visible."""
+    from docx import Document
+    from docx.oxml import parse_xml
+
+    p = data_dir / 'vanish.docx'
+    doc = Document()
+    # Real appendix fragment: trailing hidden "at ma x  : " after visible R}.
+    real = doc.add_paragraph()
+    real._p.append(_omath(
+        '<m:r><m:t>hkp</m:t></m:r>'
+        '<m:r><m:t>∈</m:t></m:r>'
+        '<m:r><m:t>1,…,R</m:t></m:r>'
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/>'
+        f'<w:vanish/></w:rPr><m:t xml:space="preserve">at ma x  : </m:t></m:r>'
+    ))
+    toggles = doc.add_paragraph()
+    toggles._p.append(_omath(
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:vanish w:val="0"/></w:rPr><m:t>VISIBLE0</m:t></m:r>'
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:vanish w:val="false"/></w:rPr><m:t>VISIBLEFALSE</m:t></m:r>'
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:vanish w:val="off"/></w:rPr><m:t>VISIBLEOFF</m:t></m:r>'
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:vanish w:val="1"/></w:rPr><m:t>HIDDEN1</m:t></m:r>'
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:vanish w:val="true"/></w:rPr><m:t>HIDDENTRUE</m:t></m:r>'
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:vanish w:val="on"/></w:rPr><m:t>HIDDENON</m:t></m:r>'
+        '<m:r><m:t>KEPT</m:t></m:r>'
+        f'<m:r><w:rPr xmlns:w="{W_NS}"><w:vanish/></w:rPr><m:t>HIDDENXYZ</m:t></m:r>'
+    ))
+    wr = doc.add_paragraph()
+    wr.add_run('shown ')
+    hidden_run = wr.add_run('secret vanish')
+    hidden_run._r.get_or_add_rPr().append(
+        parse_xml(f'<w:vanish xmlns:w="{W_NS}"/>')
+    )
+    wr.add_run(' tail')
+    off_run = doc.add_paragraph()
+    off_run.add_run('keep-run ')
+    visible_run = off_run.add_run('EXPLICITOFF')
+    visible_run._r.get_or_add_rPr().append(
+        parse_xml(f'<w:vanish xmlns:w="{W_NS}" w:val="0"/>')
+    )
+    off_run.add_run(' after')
+    doc.save(p)
+
+    d = import_document(p)
+    blob = '\n'.join(b['text'] for b in d['blocks'])
+    assert 'hkp' in blob and '1' in blob and 'R' in blob
+    assert 'at ma x' not in blob
+    assert 'at ma' not in blob
+    assert 'HIDDENXYZ' not in blob
+    assert 'HIDDEN1' not in blob
+    assert 'HIDDENTRUE' not in blob
+    assert 'HIDDENON' not in blob
+    assert 'secret vanish' not in blob
+    assert 'VISIBLE0' in blob
+    assert 'VISIBLEFALSE' in blob
+    assert 'VISIBLEOFF' in blob
+    assert 'KEPT' in blob
+    assert 'shown' in blob and 'tail' in blob
+    assert 'keep-run' in blob and 'EXPLICITOFF' in blob and 'after' in blob
+    assert all(i['resolution'] is None for i in d['issues'])
+
+
+def _write_ole_docx(path, preview_name, preview_bytes):
+    from docx import Document
+    from lxml import etree
+    import zipfile
+    import io
+
+    doc = Document()
+    doc.add_paragraph('Figure 2. Construction of the spatial hash.')
+    doc.add_paragraph('Body after the object.')
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    with zipfile.ZipFile(buf, 'r') as z:
+        files = {name: z.read(name) for name in z.namelist()}
+
+    R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    V = 'urn:schemas-microsoft-com:vml'
+    O = 'urn:schemas-microsoft-com:office:office'
+    PKG_R = 'http://schemas.openxmlformats.org/package/2006/relationships'
+    CT = 'http://schemas.openxmlformats.org/package/2006/content-types'
+
+    root = etree.fromstring(files['word/document.xml'])
+    body = root.find(f'{{{W_NS}}}body')
+    sect = body.find(f'{{{W_NS}}}sectPr')
+    p_el = etree.Element(f'{{{W_NS}}}p')
+    r_el = etree.SubElement(p_el, f'{{{W_NS}}}r')
+    obj = etree.SubElement(r_el, f'{{{W_NS}}}object')
+    obj.set(f'{{{W_NS}}}dxaOrig', '5564')
+    obj.set(f'{{{W_NS}}}dyaOrig', '2849')
+    shape = etree.SubElement(obj, f'{{{V}}}shape')
+    shape.set('id', '_x0000_i1025')
+    shape.set('style', 'width:239.25pt;height:123pt')
+    imagedata = etree.SubElement(shape, f'{{{V}}}imagedata')
+    imagedata.set(f'{{{R}}}id', 'rId17')
+    ole = etree.SubElement(obj, f'{{{O}}}OLEObject')
+    ole.set('Type', 'Embed')
+    ole.set('ProgID', 'Word.Picture.8')
+    ole.set('ShapeID', '_x0000_i1025')
+    ole.set(f'{{{R}}}id', 'rId18')
+    if sect is not None:
+        sect.addprevious(p_el)
+    else:
+        body.append(p_el)
+    files['word/document.xml'] = etree.tostring(
+        root, xml_declaration=True, encoding='UTF-8', standalone=True
+    )
+
+    rels = etree.fromstring(files['word/_rels/document.xml.rels'])
+    def add_rel(rid, typ, target):
+        rel = etree.SubElement(rels, f'{{{PKG_R}}}Relationship')
+        rel.set('Id', rid)
+        rel.set('Type', typ)
+        rel.set('Target', target)
+    add_rel(
+        'rId17',
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
+        f'media/{preview_name}',
+    )
+    add_rel(
+        'rId18',
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject',
+        'embeddings/oleObject1.bin',
+    )
+    files['word/_rels/document.xml.rels'] = etree.tostring(
+        rels, xml_declaration=True, encoding='UTF-8', standalone=True
+    )
+    files[f'word/media/{preview_name}'] = preview_bytes
+    files['word/embeddings/oleObject1.bin'] = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' + b'\x00' * 64
+
+    ctypes = etree.fromstring(files['[Content_Types].xml'])
+    def add_override(part_name, ctype):
+        el = etree.SubElement(ctypes, f'{{{CT}}}Override')
+        el.set('PartName', part_name)
+        el.set('ContentType', ctype)
+    ctype = 'image/x-emf' if preview_name.endswith('.emf') else 'image/png'
+    add_override(f'/word/media/{preview_name}', ctype)
+    add_override(
+        '/word/embeddings/oleObject1.bin',
+        'application/vnd.openxmlformats-officedocument.oleObject',
+    )
+    files['[Content_Types].xml'] = etree.tostring(
+        ctypes, xml_declaration=True, encoding='UTF-8', standalone=True
+    )
+
+    with zipfile.ZipFile(path, 'w') as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+
+
+def test_docx_ole_word_picture_not_silent(data_dir):
+    """Word.Picture OLE with VML preview is an issue (and/or extracted media), never omitted."""
+    from reader.store import folder
+
+    p = data_dir / 'ole.docx'
+    _write_ole_docx(p, 'image7.emf', b'\x01\x00\x00\x00l\x00\x00\x00' + b'\x00' * 64)
+    d = import_document(p)
+    ole_issues = [i for i in d['issues'] if str(i.get('id', '')).startswith('docx-ole-')]
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure']
+    assert ole_issues, 'OLE Word.Picture must not be dropped without an issue'
+    assert all(i['resolution'] is None for i in ole_issues)
+    blob = '\n'.join(i['message'] for i in ole_issues)
+    assert 'Word.Picture.8' in blob
+    assert 'rId17' in blob and 'rId18' in blob
+    assert 'image7.emf' in blob
+    assert figs, 'OLE object should occupy a figure slot in reading order'
+    directory = folder(d['id'])
+    retained = list(directory.glob('image-*.emf')) + [
+        directory / b['asset'] for b in figs if b.get('asset')
+    ]
+    assert any(path.is_file() and path.stat().st_size > 0 for path in retained)
+    assert any('Figure 2' in b['text'] for b in d['blocks'])
+    assert any('Body after the object' in b['text'] for b in d['blocks'])
+
+
+def test_docx_srcrect_nonzero_crop_applied_or_issued(data_dir):
+    """Non-zero a:srcRect is applied when saving, or recorded as an unresolved limitation."""
+    from docx import Document
+    from lxml import etree
+    from PIL import Image as PILImage
+    from reader.store import folder
+    import zipfile
+
+    img = data_dir / 'stripes.png'
+    im = PILImage.new('RGB', (10, 4), color=(255, 0, 0))
+    for x in range(5, 10):
+        for y in range(4):
+            im.putpixel((x, y), (0, 0, 255))
+    im.save(img)
+
+    p = data_dir / 'crop.docx'
+    doc = Document()
+    doc.add_paragraph().add_run().add_picture(str(img))
+    doc.save(p)
+
+    A = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    with zipfile.ZipFile(p, 'r') as z:
+        files = {name: z.read(name) for name in z.namelist()}
+    root = etree.fromstring(files['word/document.xml'])
+    for blip in root.iter(f'{{{A}}}blip'):
+        rect = etree.Element(f'{{{A}}}srcRect')
+        rect.set('l', '50000')
+        blip.addnext(rect)
+    files['word/document.xml'] = etree.tostring(
+        root, xml_declaration=True, encoding='UTF-8', standalone=True
+    )
+    with zipfile.ZipFile(p, 'w') as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+
+    d = import_document(p)
+    figs = [b for b in d['blocks'] if b['kind'] == 'figure' and b.get('asset')]
+    assert figs
+    directory = folder(d['id'])
+    out = PILImage.open(directory / figs[0]['asset'])
+    mid = out.getpixel((out.size[0] // 2, out.size[1] // 2))
+    cropped = out.size[0] < 10 and mid[2] > 200 and mid[0] < 80
+    issued = any(
+        'srcRect' in i['message'] or 'crop' in i['message'].lower()
+        for i in d['issues']
+    )
+    assert cropped or issued
+    assert all(i['resolution'] is None for i in d['issues'])
+

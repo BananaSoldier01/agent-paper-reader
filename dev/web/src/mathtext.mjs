@@ -1,9 +1,10 @@
 // Split reader text into literal prose and TeX math.
 // \$ is a literal dollar (kept, not a delimiter). $$...$$ is display math.
-// A currency amount ($30, $0.015, $30,000) is prose: the $ is followed by a
-// number and then whitespace or punctuation, not by a math closer.
-// Inline $...$ still requires a non-space after the opener, a non-space before
-// the closer, and a closer that is not followed by a digit.
+// Currency is recognized only at an unopened $: a $ followed by a number that
+// then ends in whitespace or punctuation ($30, $0.015, $30,000) stays prose.
+// Inline $...$ requires a non-space after the opener and a non-space before
+// the closer. A closer is accepted even when the next character is a digit
+// ($n=$512). Never skip a closer and scan across prose for a later $.
 
 const CURRENCY_AMOUNT = /^(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?/;
 
@@ -50,8 +51,6 @@ function findInlineClose(src, bodyStart) {
     if (ch !== '$') continue;
     const prev = src[j - 1];
     if (isSpace(prev) || prev === '$' || prev === '\\') continue;
-    const next = src[j + 1];
-    if (next >= '0' && next <= '9') continue;
     return j;
   }
   return -1;
