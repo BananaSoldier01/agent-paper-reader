@@ -318,6 +318,11 @@ def test_keep_extracted_rejects_figure_merge_without_explicit_asset(tmp_path, mo
     with pytest.raises(ValueError, match='figure assets'):
         submit(doc['id'], {**base, 'submission_id': 'merge-drop-img',
                            'merges': [{'into': a['id'], 'from': [b['id']], 'structure_note': 'join figures'}]})
+    for label, bad in (('null', None), ('empty', ''), ('false', False)):
+        with pytest.raises(ValueError):
+            submit(doc['id'], {**base, 'submission_id': f'merge-bad-asset-{label}',
+                               'merges': [{'into': a['id'], 'from': [b['id']], 'structure_note': 'join figures',
+                                           'asset': bad}]})
     kept = submit(doc['id'], {**base, 'revision': doc['revision'], 'submission_id': 'merge-keep-img',
                               'merges': [{'into': a['id'], 'from': [b['id']], 'structure_note': 'join figures',
                                          'asset': a['asset']}]})
@@ -375,3 +380,32 @@ def test_long_section_context_is_bounded_by_default_projection():
     assert page['section_window']['section_offset'] == 40 and page['section_window']['truncated'] is True
     full = project_document(doc, full=True, view='tasks', limit=1)
     assert len(full['section_context']) == 200
+
+
+def test_sparse_pending_context_is_local_neighbors_not_span():
+    n = 200
+    body = 'x' * 4000
+    atoms, blocks = [], []
+    for i in range(n):
+        text = f'{i:03d} {body}'
+        translation = {'text': f'zh {i:03d}', 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]}
+        pending = i in (0, n - 1)
+        review = None if pending else {
+            'agent': 'a', 'translation_hash': digest(translation), 'note': 'checked',
+            'difference_explanation': '', 'duplicate_explanation': '',
+        }
+        atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
+        blocks.append({'id': f'b{i:05d}', 'kind': 'paragraph', 'text': text, 'source_ids': [f'a{i:05d}'],
+                       'asset': None, 'translation': translation, 'history': [], 'review': review,
+                       'structure_note': 'kept', 'user_edited': False})
+    doc = {'schema_version': 1, 'id': 'd'*24, 'title': 'Sparse', 'source_file': 'source.md', 'revision': 4,
+           'stage': 'review', 'atoms': atoms, 'blocks': blocks, 'terms': [], 'notes': [],
+           'structure_review': {'agent': 'a', 'note': 'n'}, 'terms_review': {'agent': 'a', 'note': 'n'},
+           'full_review': None, 'issues': []}
+    view = project_document(doc, view='tasks', limit=8)
+    assert view['stage'] == 'review'
+    assert [b['id'] for b in view['blocks']] == ['b00000', 'b00199']
+    assert [b['id'] for b in view['context']] == ['b00000', 'b00001', 'b00198', 'b00199']
+    assert len(view['context']) <= 6
+    assert len(json.dumps(view['context'])) < 761_000
+    assert len(view['section_context']) <= 24

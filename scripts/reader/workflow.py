@@ -181,8 +181,17 @@ DEFAULT_SECTION_CONTEXT_LIMIT = 24
 
 
 def _window(doc, chosen, *, section_limit=None, section_offset=None):
-    indices = [doc['blocks'].index(b) for b in chosen]
-    context = doc['blocks'][max(0, min(indices)-1):max(indices)+2] if indices else []
+    blocks = doc['blocks']
+    indices = [blocks.index(b) for b in chosen]
+    # Neighbors of each chosen block (±1), not the contiguous span from first to last.
+    context = []
+    if indices:
+        seen = set()
+        for index in sorted(set(indices)):
+            for pos in range(max(0, index - 1), min(len(blocks), index + 2)):
+                if pos not in seen:
+                    seen.add(pos)
+                    context.append(blocks[pos])
     # Include enclosing section, then optionally window it for default projections.
     section = []
     start = end = 0
@@ -295,9 +304,20 @@ def _canonical(value):
 
 
 def _assign_asset(doc_id, block, asset):
-    if asset and (not isinstance(asset, str) or '/' in asset or '\\' in asset or not (folder(doc_id) / asset).is_file()):
+    # A local asset is a non-empty filename with no path separators, already in the doc folder.
+    if not isinstance(asset, str) or not asset or '/' in asset or '\\' in asset or not (folder(doc_id) / asset).is_file():
         raise ValueError('Unknown local asset')
     block['asset'] = asset
+
+
+def _apply_optional_asset(doc_id, block, asset):
+    # Full-block and update payloads repeat asset: null for text. That is not an assignment
+    # and must not clear a file that is already there.
+    if not asset:
+        if block.get('asset'):
+            raise ValueError('Unknown local asset')
+        return
+    _assign_asset(doc_id, block, asset)
 
 
 def _source_text(doc, source_ids):
@@ -330,7 +350,7 @@ def _structure_replace(doc, doc_id, payload):
         block = dict(old.get(item['id'], {'translation': None, 'history': [], 'review': None, 'user_edited': False, 'asset': None}))
         block.update({k: item[k] for k in ('id', 'kind', 'text', 'source_ids', 'structure_note')})
         if 'asset' in item:
-            _assign_asset(doc_id, block, item['asset'])
+            _apply_optional_asset(doc_id, block, item['asset'])
         if not block['source_ids'] or not block['structure_note'].strip():
             raise ValueError('Each structural decision requires source ids and a reason')
         if block['kind'] not in VERBATIM:
@@ -349,6 +369,7 @@ def _merge_assets(doc_id, into, sources, merge):
         if asset and asset not in assets:
             assets.append(asset)
     if 'asset' in merge:
+        # The key alone is not an explicit choice. null, "", and false are rejected.
         _assign_asset(doc_id, into, merge['asset'])
         return
     if len(assets) > 1:
@@ -388,7 +409,7 @@ def _structure_keep(doc, doc_id, payload):
             # Incremental text/source edits need a fresh reason; do not reuse a stale one.
             block['source_change'] = ''
         if 'asset' in item:
-            _assign_asset(doc_id, block, item['asset'])
+            _apply_optional_asset(doc_id, block, item['asset'])
     for merge in merges:
         into = by_id.get(merge.get('into'))
         if not into:
