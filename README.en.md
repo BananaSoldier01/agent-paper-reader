@@ -106,7 +106,11 @@ Automatically displaying these vector images also requires:
 - `rsvg-convert` or Inkscape on `PATH`. The Linux package is `librsvg2-bin`; macOS can use Homebrew's `librsvg`.
 - `fontconfig` / `fc-match` matches for Times New Roman or a compatible family, and OpenSymbol. Linux packages include `fonts-liberation` or `fonts-croscore`, and `fonts-opensymbol`. An arbitrary fallback font does not prove the required coverage.
 
-Run `doctor` and inspect `emf_preview.ready`, the matched font families, and `missing`. Python `setup` does not install these system tools or fonts. Missing dependencies, failed conversion, or unreliable output leave the original EMF and issue record intact; the image must not be reported as restored. These extra components are only needed for the relevant Word images, not ordinary inputs such as PDF.
+Run `doctor` and inspect `emf_preview.ready`, the matched font families, and `missing`. The top-level `ready` only confirms the base runtime; it does not confirm that EMF conversion is ready. Python `setup` does not install these system tools or fonts.
+
+Existing font files may still be undiscovered because of fontconfig's search paths. If a fallback font is reported, ask the Agent to check the font configuration. An already verified configuration file can be selected with a process-scoped `FONTCONFIG_FILE`; use the same configuration for `doctor` and the CLI or service performing the import. If a previous import left missing images, preserve its data and re-import the original DOCX into a separate workspace after fixing the environment. Exporting the existing record again does not repeat conversion.
+
+Missing dependencies, failed conversion, or unreliable output leave the original EMF and issue record intact; the image must not be reported as restored. These extra components are only needed for the relevant Word images, not ordinary inputs such as PDF.
 
 </details>
 

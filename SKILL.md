@@ -28,6 +28,10 @@ description: 将英文文字型 PDF、Markdown、纯文本、本地 HTML、Word 
 python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>" doctor
 ```
 
+`ready` 只表示基础运行环境就绪；处理含 EMF 嵌入图的 Word 时，还要检查 `emf_preview.ready`、实际匹配的字体 family 和 `missing`。字体文件已存在不等于 fontconfig 已识别，回退到 Verdana 等未验证字体时不能判断 EMF 环境齐全。
+
+若字体已存在但未被发现，检查 fontconfig 的字体搜索路径；可复用已验证的配置文件，通过进程级 `FONTCONFIG_FILE` 指定，让 `doctor` 与执行导入的 CLI 或服务使用同一配置。配置文件和缓存放在 Skill 安装目录外，不将当前机器的固定字体路径写入通用 Skill。此前因环境缺失导入时留下的缺图，修正环境后应保留已有数据，在另建工作区用原 DOCX 重新导入验证；仅重导出不会重做 EMF 转换。
+
 仅在环境缺失或依赖版本过期时运行同一入口的 `setup`。它首次需要联网，在工作目录创建隔离环境；不安装全局 Python，不修改 Agent 配置。界面已随包构建，普通使用不需要 Node.js。缺少命令、文件或必要的原页查看能力时，说明阻塞原因和已完成部分。
 
 下文命令均省略此公共前缀：

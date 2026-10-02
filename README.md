@@ -105,7 +105,11 @@ Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**
 - `PATH` 上的 `rsvg-convert` 或 Inkscape。Linux 的相关包为 `librsvg2-bin`；macOS 可使用 Homebrew 的 `librsvg`。
 - `fontconfig` / `fc-match` 能识别 Times New Roman 或兼容字体，以及 OpenSymbol。Linux 可使用 `fonts-liberation` 或 `fonts-croscore`、`fonts-opensymbol`；不能仅凭任意回退字体存在就判断齐全。
 
-运行 `doctor`，查看 `emf_preview.ready`、实际匹配的字体 family 和 `missing`。这些系统工具和字体不会由 Python 的 `setup` 自动安装。缺少环境、转换失败或结果不可靠时，原始 EMF 和问题记录会保留，不能按已经恢复图片交付。这些额外组件只用于相关 Word 嵌入图，普通 PDF 等输入不要求它们。
+运行 `doctor`，查看 `emf_preview.ready`、实际匹配的字体 family 和 `missing`。顶层 `ready` 只表示基础运行环境就绪，不保证 EMF 转图环境齐全。这些系统工具和字体不会由 Python 的 `setup` 自动安装。
+
+字体文件已存在，也可能因 fontconfig 的搜索路径而未被识别。遇到回退字体时，可让 Agent 检查字体配置；若已有验证可用的配置文件，可通过进程级 `FONTCONFIG_FILE` 指定，并让 `doctor` 与执行导入的 CLI 或服务使用同一配置。若此前导入留下了缺图，修正环境后保留已有数据，在另建工作区从原 DOCX 重新导入验证；仅重导出不会重做转换。
+
+缺少环境、转换失败或结果不可靠时，原始 EMF 和问题记录会保留，不能按已经恢复图片交付。这些额外组件只用于相关 Word 嵌入图，普通 PDF 等输入不要求它们。
 
 </details>
 
