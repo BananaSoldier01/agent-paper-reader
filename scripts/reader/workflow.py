@@ -62,6 +62,12 @@ def validate(doc):
     for issue in doc['issues']:
         if not issue.get('resolution'):
             errors.append(f"Unresolved extraction issue: {issue['id']}")
+    limitations = confirmed_limitations(doc)
+    for item in limitations:
+        warnings.append(
+            'Confirmed known limitation (not actually fixed): '
+            f"{item['id']} [{item['category']}] {_short_resolution(item['resolution'])}"
+        )
     translated_texts = Counter(b['translation']['text'].strip() for b in doc['blocks'] if b.get('translation'))
     for b in doc['blocks']:
         if b['kind'] in VERBATIM:
@@ -91,7 +97,8 @@ def validate(doc):
             warnings.append(f"Note {note['id']} needs reattachment")
     return {'ok':not errors,'errors':errors,'warnings':warnings,'blocks':len(doc['blocks']),
             'translated':sum(bool(b['translation']) for b in doc['blocks']),
-            'reviewed':sum(bool(b['review']) for b in doc['blocks'])}
+            'reviewed':sum(bool(b['review']) for b in doc['blocks']),
+            'confirmed_limitations':limitations}
 
 
 def note_status(doc,note):
@@ -119,6 +126,31 @@ def _issue_prefix(issue):
         return kind.strip()
     iid = str(issue.get('id') or 'issue')
     return re.sub(r'-(?:\d+|[ab]\d+)$', '', iid) or iid
+
+
+def _short_resolution(text, limit=120):
+    compact = ' '.join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + '…'
+
+
+def confirmed_limitations(doc):
+    rows = []
+    for issue in doc.get('issues') or []:
+        if issue.get('resolved_by') != 'limitation_batch':
+            continue
+        resolution = issue.get('resolution')
+        if not isinstance(resolution, str) or not resolution.strip():
+            continue
+        evidence = issue.get('resolution_evidence')
+        rows.append({
+            'id': issue.get('id'),
+            'category': _issue_prefix(issue),
+            'resolution': resolution,
+            'resolution_evidence': evidence if isinstance(evidence, str) else '',
+        })
+    return rows
 
 
 LIMITATION_CATEGORIES = {
@@ -236,7 +268,11 @@ def _resolve_extraction_issues(doc, payload, op):
         for item in issues:
             if not item['resolution'].strip():
                 raise ValueError('Extraction issue requires explicit resolution/limitation')
-            next(i for i in doc['issues'] if i['id'] == item['id'])['resolution'] = item['resolution']
+            target = next(i for i in doc['issues'] if i['id'] == item['id'])
+            target['resolution'] = item['resolution']
+            # Per-id text replaces any earlier batch mark in this same submit.
+            target.pop('resolution_evidence', None)
+            target.pop('resolved_by', None)
 
 
 def issue_summary(doc, unresolved_only=False, samples=3):

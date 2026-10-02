@@ -29,7 +29,7 @@
 
 翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。这些块可以含翻译所需的完整字段，并带计算出来的 `translation_hash`；不附带整份 atoms。`issue_summary` 只统计未解决项。默认投影的 `section_context` 有长度上限（默认 24 块），并附带 `section_window`（`section_total` / `section_offset` / `section_limit` / `truncated` 等）便于分段读取；CLI 可用 `--section-limit` / `--section-offset` 翻页。要整节或全篇时用 `--full`，或加大 `--section-limit`。要核对全篇译文哈希时用 `show --full`。
 
-`progress` 默认投影是 validate 摘要加上 `outline_length`、`unresolved_issues` 和上述公共字段，不返回块正文或 atoms。validate 原有的 `blocks` 仍是块数量，不是块列表。
+`progress` 默认投影是 validate 摘要加上 `outline_length`、`unresolved_issues` 和上述公共字段，不返回块正文或 atoms。validate 原有的 `blocks` 仍是块数量，不是块列表。摘要另含 `confirmed_limitations`（可为 `[]`）：按类确认、仍未实际修复的 issue，每项有 `id`、`category`（与批处理相同的前缀或 type）、`resolution`、`resolution_evidence`。这些项同时出现在 `warnings` 里，不进入 `errors`，因此 `ok` 仍只由 errors 决定。
 
 ## 提交示例
 
@@ -64,6 +64,8 @@
 ```json
 {"revision":4,"submission_id":"resolve-lim-1","agent":"current agent","operation":"resolve","limitations":[{"category":"tex-includegraphics","resolution":"单文件 TeX 不编译，\\includegraphics 未嵌入，属产品已知边界。","evidence":"核对 sample tex-includegraphics-1、tex-includegraphics-2，源文件无编译步骤。"}]}
 ```
+
+按类写入后，这些 issue 不再算未解决，不单独阻止 `validate` 通过或导出。它们仍是已确认的已知限制，不是已经修复：`validate` 为每条 `resolved_by=limitation_batch` 且 resolution 非空的 issue 增加 warning，并在 `confirmed_limitations` 列出 id、category、resolution、resolution_evidence。阅读界面和离线 HTML 会显示这些残留限制。空 resolution 仍然是 error。逐条 `issues` 更新 resolution 时会删除该 issue 上的 `resolution_evidence` 和 `resolved_by`。同一次提交里若先 `limitations` 再按 id 覆盖，被覆盖的 id 以逐条为准，不保留批处理字段。
 
 用户 HTTP 编辑使用 `POST /api/documents/ID/edit`，携带会话令牌 `X-Reader-Token` 和 revision。operation 为 `note/delete_note/translation/term/reading`。令牌由同源 `/api/session` 返回，只保存在运行内存；无 CORS、默认仅回环地址，非本地主机名拒绝。此服务不是多用户权限系统，不应暴露公网。
 
