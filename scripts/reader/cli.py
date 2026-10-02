@@ -2,9 +2,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from .store import read, digest
+from .store import read
 from .importer import import_document
-from .workflow import tasks, submit, validate, fingerprint
+from .workflow import submit, validate, fingerprint, project_document
 from .exporter import export_html
 
 
@@ -15,6 +15,10 @@ def main():
     for name in ('show','tasks','progress','validate','submit','export'):
         p=commands.add_parser(name); p.add_argument('document_id')
         if name=='tasks': p.add_argument('--limit',type=int,default=8)
+        if name in ('show','tasks','progress'): p.add_argument('--full',action='store_true')
+        if name in ('show','tasks'):
+            p.add_argument('--section-limit',type=int,default=None)
+            p.add_argument('--section-offset',type=int,default=None)
         if name=='submit': p.add_argument('payload')
         if name=='export': p.add_argument('--output')
     p=commands.add_parser('crop'); p.add_argument('document_id'); p.add_argument('--page',type=int,required=True); p.add_argument('--bbox',nargs=4,type=float,required=True)
@@ -39,11 +43,13 @@ def main():
         else:
             d=read(args.document_id)
             if args.command=='show':
-                result=d
-                result['fingerprint']=fingerprint(d)
-                for b in result['blocks']:
-                    b['translation_hash']=digest(b['translation']) if b['translation'] else None
-            elif args.command=='tasks': result=tasks(d,max(1,args.limit))
+                result=project_document(d, full=args.full, view='show',
+                                       section_limit=args.section_limit, section_offset=args.section_offset)
+            elif args.command=='tasks':
+                result=project_document(d, full=args.full, view='tasks', limit=max(1,args.limit),
+                                       section_limit=args.section_limit, section_offset=args.section_offset)
+            elif args.command=='progress':
+                result=project_document(d, full=args.full, view='progress')
             else: result={'document_id':d['id'],'revision':d['revision'],'stage':d['stage'],'fingerprint':fingerprint(d),**validate(d)}
         print(json.dumps({'ok':True,'result':result},ensure_ascii=False,indent=2))
         if args.command=='validate' and not result['ok']:

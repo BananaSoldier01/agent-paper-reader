@@ -1,11 +1,12 @@
 import copy
 import json
+import sys
 from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi.testclient import TestClient
 from reader import store
 from reader.importer import import_document
-from reader.workflow import submit, user_edit, tasks, validate, fingerprint, note_status
+from reader.workflow import submit, user_edit, tasks, validate, fingerprint, note_status, project_document
 from reader.store import digest, Conflict
 from reader.server import app, TOKEN
 
@@ -118,3 +119,293 @@ def test_attach_visual_preserves_frozen_anchors(doc):
     assert d['notes']==before['notes'] and note_status(d,d['notes'][0])=='attached'
     assert d['full_review'] is None
     with pytest.raises(ValueError):send(d,'attach_asset',block_id=b['id'],asset=asset,note='no replacement')
+
+
+def _synthetic_structure_doc():
+    text = 'Alpha beta gamma delta epsilon. ' * 40
+    emoji = '😀' * 200
+    n = 40
+    atoms = [{'id': f'a{i:05d}', 'text': emoji if i == 3 else text, 'location': {'start': i, 'end': i+1}} for i in range(n)]
+    blocks = [{'id': f'b{i:05d}', 'kind': 'heading' if i % 10 == 0 else 'paragraph', 'text': atoms[i]['text'],
+               'source_ids': [atoms[i]['id']], 'asset': None, 'translation': None, 'history': [], 'review': None,
+               'structure_note': '', 'user_edited': False} for i in range(n)]
+    message = 'Unresolved extraction detail. ' * 40
+    issues = [{'id': f'page-{i}', 'message': message, 'resolution': None} for i in range(12)]
+    issues.append({'id': 'page-99', 'message': message, 'resolution': 'checked the scan'})
+    return {'schema_version': 1, 'id': 'a'*24, 'title': 'Big', 'source_file': 'source.md', 'revision': 0,
+            'stage': 'structure', 'atoms': atoms, 'blocks': blocks, 'issues': issues, 'terms': [], 'notes': [],
+            'structure_review': None, 'terms_review': None, 'full_review': None}, message
+
+
+def test_structure_projection_smaller_than_full_document():
+    doc, message = _synthetic_structure_doc()
+    full = project_document(doc, full=True, view='show')
+    view = project_document(doc, view='show')
+    task_full = project_document(doc, full=True, view='tasks', limit=8)
+    task_view = project_document(doc, view='tasks', limit=8)
+    assert len(json.dumps(view)) < len(json.dumps(full)) * 0.5
+    assert len(json.dumps(task_view)) < len(json.dumps(task_full)) * 0.5
+    assert message in json.dumps(full) and message in json.dumps(task_full)
+    projected = json.dumps(view, ensure_ascii=False) + json.dumps(task_view, ensure_ascii=False)
+    assert message not in projected
+    assert '"atoms"' not in projected and '"history"' not in projected and '"translation"' not in projected
+    assert view['projection'] is True and view['block_count'] == 40 and view['atom_count'] == 40
+    assert len(view['blocks']) == 40 and len(task_view['blocks']) == 8
+    assert all(set(b) == {'id', 'kind', 'text', 'has_structure_note', 'source_count'} for b in view['blocks'])
+    assert all(len(b['text']) <= 160 for b in view['blocks'])
+    emoji = next(b for b in view['blocks'] if b['id'] == 'b00003')
+    assert emoji['text'] == '😀' * 160 and len(emoji['text']) == 160
+    summary = view['issue_summary']
+    assert summary['unresolved'] == 12 and summary['resolved'] == 1
+    assert summary['by_type']['page']['sample_ids'] == ['page-0', 'page-1', 'page-2']
+    assert 'checked the scan' not in projected
+    assert task_view['projection'] is True and 'issues' not in task_view
+    assert 'issues' in task_full and task_full['issues'][0]['message'] == message
+
+
+def test_translation_projection_keeps_section_without_atoms_or_issue_bodies():
+    text = 'Sentence about turbines and limits. ' * 12
+    atoms, blocks = [], []
+    for i, kind in enumerate(('heading', 'paragraph', 'paragraph')):
+        atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
+        blocks.append({'id': f'b{i:05d}', 'kind': kind, 'text': text, 'source_ids': [f'a{i:05d}'], 'asset': None,
+                       'translation': {'text': '译文', 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]} if i == 0 else None,
+                       'history': [], 'review': None, 'structure_note': 'kept', 'user_edited': False})
+    unresolved = 'UNRESOLVED_BODY_' + 'x'*400
+    resolved = 'RESOLVED_BODY_' + 'y'*400
+    doc = {'schema_version': 1, 'id': 'b'*24, 'title': 'Terms', 'source_file': 'source.md', 'revision': 3,
+           'stage': 'translate', 'atoms': atoms, 'blocks': blocks, 'terms': [{'id': 't1', 'en': 'turbine', 'zh': '涡轮', 'definition': '机器'}],
+           'notes': [], 'structure_review': {'agent': 'a', 'note': 'n'}, 'terms_review': {'agent': 'a', 'note': 'n'},
+           'full_review': None, 'issues': [{'id': 'page-1', 'message': unresolved, 'resolution': None},
+                                           {'id': 'done-9', 'message': resolved, 'resolution': 'already handled'}]}
+    view = project_document(doc, view='show')
+    dumped = json.dumps(view, ensure_ascii=False)
+    assert view['projection'] is True and view['stage'] == 'translate'
+    assert 'atoms' not in view and '"location"' not in dumped
+    assert unresolved not in dumped and resolved not in dumped and 'done-9' not in json.dumps(view['issue_summary'])
+    assert any(b.get('text') == text for b in view['section_context'])
+    assert view['terms'][0]['en'] == 'turbine'
+    assert any(b.get('translation_hash') for b in view['section_context'])
+    assert view['issue_summary']['unresolved'] == 1
+    assert tasks(doc)['stage'] == 'translate'
+
+
+def test_cli_projection_and_full_switch(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(store, 'DATA', tmp_path/'data')
+    path = tmp_path/'cli.md'
+    path.write_text('# Title\n\nA short paragraph for the projection check.\n', encoding='utf-8')
+    doc = import_document(path)
+    from reader.cli import main
+
+    def run(*argv):
+        monkeypatch.setattr(sys, 'argv', ['paper', *argv])
+        main()
+        return json.loads(capsys.readouterr().out)
+
+    shown = run('show', doc['id'])['result']
+    assert shown['projection'] is True and 'atoms' not in shown and shown['block_count'] == len(doc['blocks'])
+    full = run('show', doc['id'], '--full')['result']
+    assert 'projection' not in full and 'atoms' in full and 'fingerprint' in full
+    assert 'translation_hash' in full['blocks'][0]
+    progress = run('progress', doc['id'])['result']
+    assert progress['projection'] is True and 'atoms' not in progress
+    assert progress['outline_length'] == 1 and 'unresolved_issues' in progress and 'errors' in progress
+    legacy = run('progress', doc['id'], '--full')['result']
+    assert 'projection' not in legacy and 'outline_length' not in legacy and 'errors' in legacy and 'atoms' not in legacy
+    batch = run('tasks', doc['id'])['result']
+    assert batch['projection'] is True and 'issues' not in batch and 'issue_summary' in batch
+    old_tasks = run('tasks', doc['id'], '--full')['result']
+    assert 'projection' not in old_tasks and 'issues' in old_tasks
+
+
+def test_keep_extracted_updates_merges_and_default_note(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DATA', tmp_path/'data')
+    path = tmp_path/'keep.md'
+    path.write_text('# Title\n\nFirst sentence stays.\n\nSecond part.\n\nThird part.\n', encoding='utf-8')
+    doc = import_document(path)
+    assert any('Structure not reviewed' in e for e in validate(doc)['errors'])
+    ids = [b['id'] for b in doc['blocks']]
+    assert len(ids) >= 4
+    before_issues = copy.deepcopy(doc['issues'])
+    original_sources = {b['id']: list(b['source_ids']) for b in doc['blocks']}
+    merged = doc['blocks'][1]['text'] + ' ' + doc['blocks'][2]['text']
+    doc = submit(doc['id'], {'revision': doc['revision'], 'submission_id': 'keep-1', 'operation': 'structure',
+                             'agent': 'test', 'note': 'Keep extraction', 'keep_extracted': True,
+                             'default_structure_note': 'Extraction matches source',
+                             'updates': [{'id': ids[0], 'kind': 'heading', 'structure_note': 'Title line'}],
+                             'merges': [{'into': ids[1], 'from': [ids[2]], 'text': merged, 'structure_note': 'Join adjacent paragraphs'}]})
+    assert doc['schema_version'] == 1 and doc['structure_review']['note'] == 'Keep extraction'
+    assert doc['issues'] == before_issues
+    kept = {b['id']: b for b in doc['blocks']}
+    assert ids[2] not in kept and kept[ids[0]]['structure_note'] == 'Title line'
+    assert kept[ids[1]]['structure_note'] == 'Join adjacent paragraphs'
+    assert kept[ids[1]]['source_ids'] == original_sources[ids[1]] + original_sources[ids[2]]
+    assert kept[ids[1]]['text'] == merged
+    assert kept[ids[3]]['structure_note'] == 'Extraction matches source'
+    sources = [sid for b in doc['blocks'] for sid in b['source_ids']]
+    assert sorted(sources) == sorted(a['id'] for a in doc['atoms']) and len(sources) == len(set(sources))
+    errors = validate(doc)['errors']
+    assert not any('Structure not reviewed' in e or 'Source ledger' in e for e in errors)
+    plain = tmp_path/'plain.md'
+    plain.write_text('# H\n\nOnly one change is the note.\n', encoding='utf-8')
+    fresh = import_document(plain)
+    patched = submit(fresh['id'], {'revision': fresh['revision'], 'submission_id': 'patch-1', 'operation': 'structure',
+                                    'agent': 'test', 'note': 'Patch', 'mode': 'patch',
+                                    'default_structure_note': 'Extraction already correct'})
+    assert len(patched['blocks']) == len(fresh['blocks'])
+    assert all(b['structure_note'] == 'Extraction already correct' for b in patched['blocks'])
+    assert {tuple(b['source_ids']) for b in patched['blocks']} == {tuple(b['source_ids']) for b in fresh['blocks']}
+
+
+def test_full_blocks_still_replace_when_keep_flag_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DATA', tmp_path/'data')
+    path = tmp_path/'full.md'
+    path.write_text('# Title\n\nBody stays whole.\n', encoding='utf-8')
+    doc = import_document(path)
+    blocks = [{**b, 'structure_note': 'full path'} for b in doc['blocks']]
+    saved = submit(doc['id'], {'revision': doc['revision'], 'submission_id': 'full-1', 'operation': 'structure',
+                                'agent': 'test', 'note': 'Full list', 'blocks': blocks, 'keep_extracted': True,
+                                'default_structure_note': 'should not apply'})
+    assert [b['structure_note'] for b in saved['blocks']] == ['full path'] * len(blocks)
+    assert len(saved['blocks']) == len(blocks)
+
+
+def test_keep_extracted_rejects_missing_note_atom_and_source_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DATA', tmp_path/'data')
+    path = tmp_path/'bad.md'
+    path.write_text('# Title\n\nAlpha sentence.\n\nBeta sentence.\n', encoding='utf-8')
+    doc = import_document(path)
+    ids = [b['id'] for b in doc['blocks']]
+    base = {'revision': doc['revision'], 'operation': 'structure', 'agent': 'test', 'note': 'no'}
+    with pytest.raises(ValueError, match='reason'):
+        submit(doc['id'], {**base, 'submission_id': 'missing-note', 'keep_extracted': True})
+    with pytest.raises(ValueError, match='Merge requires structure_note'):
+        submit(doc['id'], {**base, 'submission_id': 'merge-note', 'keep_extracted': True,
+                           'default_structure_note': 'fill the rest',
+                           'merges': [{'into': ids[1], 'from': [ids[2]]}]})
+    with pytest.raises(ValueError, match='exactly once'):
+        submit(doc['id'], {**base, 'submission_id': 'drop-atom', 'keep_extracted': True,
+                           'default_structure_note': 'noted',
+                           'updates': [{'id': ids[-1], 'source_ids': [doc['blocks'][0]['source_ids'][0]]}]})
+    with pytest.raises(ValueError, match='source_change'):
+        submit(doc['id'], {**base, 'submission_id': 'rewrite', 'mode': 'keep',
+                           'default_structure_note': 'noted',
+                           'updates': [{'id': ids[1], 'text': 'Completely different wording'}]})
+    changed = submit(doc['id'], {**base, 'submission_id': 'rewrite-ok', 'mode': 'keep',
+                                 'default_structure_note': 'noted',
+                                 'updates': [{'id': ids[1], 'text': 'Completely different wording', 'source_change': 'Joined a hyphenated line'}]})
+    assert next(b for b in changed['blocks'] if b['id'] == ids[1])['source_change'] == 'Joined a hyphenated line'
+    assert not any('Source ledger' in e or 'Structure not reviewed' in e for e in validate(changed)['errors'])
+
+
+def test_keep_extracted_frozen_after_translation(doc):
+    with pytest.raises(ValueError, match='frozen'):
+        send(translated(doc), 'structure', keep_extracted=True, default_structure_note='nope', note='late')
+
+def test_keep_extracted_rejects_figure_merge_without_explicit_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DATA', tmp_path/'data')
+    path = tmp_path/'figs.md'
+    path.write_text('# Title\n\nIntro paragraph.\n\n![one](one.png)\n\n![two](two.png)\n', encoding='utf-8')
+    (tmp_path/'one.png').write_bytes(b'png-one')
+    (tmp_path/'two.png').write_bytes(b'png-two')
+    doc = import_document(path)
+    figs = [b for b in doc['blocks'] if b['kind'] == 'figure' and b.get('asset')]
+    assert len(figs) >= 2
+    a, b = figs[0], figs[1]
+    assert a['asset'] != b['asset']
+    base = {'revision': doc['revision'], 'operation': 'structure', 'agent': 'test', 'note': 'figs',
+            'keep_extracted': True, 'default_structure_note': 'kept'}
+    with pytest.raises(ValueError, match='figure assets'):
+        submit(doc['id'], {**base, 'submission_id': 'merge-drop-img',
+                           'merges': [{'into': a['id'], 'from': [b['id']], 'structure_note': 'join figures'}]})
+    for label, bad in (('null', None), ('empty', ''), ('false', False)):
+        with pytest.raises(ValueError):
+            submit(doc['id'], {**base, 'submission_id': f'merge-bad-asset-{label}',
+                               'merges': [{'into': a['id'], 'from': [b['id']], 'structure_note': 'join figures',
+                                           'asset': bad}]})
+    kept = submit(doc['id'], {**base, 'revision': doc['revision'], 'submission_id': 'merge-keep-img',
+                              'merges': [{'into': a['id'], 'from': [b['id']], 'structure_note': 'join figures',
+                                         'asset': a['asset']}]})
+    merged = next(block for block in kept['blocks'] if block['id'] == a['id'])
+    assert merged['asset'] == a['asset']
+    assert b['id'] not in {block['id'] for block in kept['blocks']}
+    assert not any('Source ledger' in e for e in validate(kept)['errors'])
+
+
+def test_keep_extracted_requires_fresh_source_change_on_reedit(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DATA', tmp_path/'data')
+    path = tmp_path/'reedit.md'
+    path.write_text('# Title\n\nOriginal wording stays here.\n', encoding='utf-8')
+    doc = import_document(path)
+    para = next(b for b in doc['blocks'] if b['kind'] == 'paragraph')
+    base = {'revision': doc['revision'], 'operation': 'structure', 'agent': 'test', 'note': 'edit',
+            'mode': 'keep', 'default_structure_note': 'noted'}
+    first = submit(doc['id'], {**base, 'submission_id': 'edit-1',
+                               'updates': [{'id': para['id'], 'text': 'OCR fixed wording once.',
+                                            'source_change': 'OCR hyphenation fix'}]})
+    assert next(b for b in first['blocks'] if b['id'] == para['id'])['source_change'] == 'OCR hyphenation fix'
+    with pytest.raises(ValueError, match='source_change'):
+        submit(first['id'], {'revision': first['revision'], 'submission_id': 'edit-2', 'operation': 'structure',
+                             'agent': 'test', 'note': 'edit again', 'mode': 'keep',
+                             'updates': [{'id': para['id'], 'text': 'Completely different second edit'}]})
+    second = submit(first['id'], {'revision': first['revision'], 'submission_id': 'edit-2-ok', 'operation': 'structure',
+                                  'agent': 'test', 'note': 'edit again', 'mode': 'keep',
+                                  'updates': [{'id': para['id'], 'text': 'Completely different second edit',
+                                               'source_change': 'Author note rewritten after OCR pass'}]})
+    assert next(b for b in second['blocks'] if b['id'] == para['id'])['source_change'] == 'Author note rewritten after OCR pass'
+
+
+def test_long_section_context_is_bounded_by_default_projection():
+    n = 200
+    atoms, blocks = [], []
+    for i in range(n):
+        text = f'Paragraph {i:03d} about turbines with enough body text to inflate payloads. '
+        atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
+        blocks.append({'id': f'b{i:05d}', 'kind': 'paragraph', 'text': text, 'source_ids': [f'a{i:05d}'],
+                       'asset': None, 'translation': None, 'history': [], 'review': None,
+                       'structure_note': 'kept', 'user_edited': False})
+    doc = {'schema_version': 1, 'id': 'c'*24, 'title': 'Long', 'source_file': 'source.md', 'revision': 2,
+           'stage': 'translate', 'atoms': atoms, 'blocks': blocks, 'terms': [], 'notes': [],
+           'structure_review': {'agent': 'a', 'note': 'n'}, 'terms_review': {'agent': 'a', 'note': 'n'},
+           'full_review': None, 'issues': []}
+    view = project_document(doc, view='tasks', limit=1)
+    assert view['projection'] is True
+    assert len(view['section_context']) <= 24
+    window = view['section_window']
+    assert window['section_total'] == 200 and window['truncated'] is True
+    assert window['section_limit'] == 24
+    assert len(json.dumps(view['section_context'])) < 80_000
+    page = project_document(doc, view='tasks', limit=1, section_limit=10, section_offset=40)
+    assert [b['id'] for b in page['section_context']] == [f'b{i:05d}' for i in range(40, 50)]
+    assert page['section_window']['section_offset'] == 40 and page['section_window']['truncated'] is True
+    full = project_document(doc, full=True, view='tasks', limit=1)
+    assert len(full['section_context']) == 200
+
+
+def test_sparse_pending_context_is_local_neighbors_not_span():
+    n = 200
+    body = 'x' * 4000
+    atoms, blocks = [], []
+    for i in range(n):
+        text = f'{i:03d} {body}'
+        translation = {'text': f'zh {i:03d}', 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]}
+        pending = i in (0, n - 1)
+        review = None if pending else {
+            'agent': 'a', 'translation_hash': digest(translation), 'note': 'checked',
+            'difference_explanation': '', 'duplicate_explanation': '',
+        }
+        atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
+        blocks.append({'id': f'b{i:05d}', 'kind': 'paragraph', 'text': text, 'source_ids': [f'a{i:05d}'],
+                       'asset': None, 'translation': translation, 'history': [], 'review': review,
+                       'structure_note': 'kept', 'user_edited': False})
+    doc = {'schema_version': 1, 'id': 'd'*24, 'title': 'Sparse', 'source_file': 'source.md', 'revision': 4,
+           'stage': 'review', 'atoms': atoms, 'blocks': blocks, 'terms': [], 'notes': [],
+           'structure_review': {'agent': 'a', 'note': 'n'}, 'terms_review': {'agent': 'a', 'note': 'n'},
+           'full_review': None, 'issues': []}
+    view = project_document(doc, view='tasks', limit=8)
+    assert view['stage'] == 'review'
+    assert [b['id'] for b in view['blocks']] == ['b00000', 'b00199']
+    assert [b['id'] for b in view['context']] == ['b00000', 'b00001', 'b00198', 'b00199']
+    assert len(view['context']) <= 6
+    assert len(json.dumps(view['context'])) < 761_000
+    assert len(view['section_context']) <= 24
