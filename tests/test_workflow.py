@@ -409,3 +409,148 @@ def test_sparse_pending_context_is_local_neighbors_not_span():
     assert len(view['context']) <= 6
     assert len(json.dumps(view['context'])) < 761_000
     assert len(view['section_context']) <= 24
+
+
+def _patch_issues(doc, issues):
+    def apply(current):
+        current['issues'] = issues
+    return store.mutate(doc['id'], doc['revision'], apply)
+
+
+_LIMITATION_RESOLUTION = (
+    'Single-file TeX does not compile; includegraphics assets stay unembedded as a product limit.'
+)
+_LIMITATION_EVIDENCE = (
+    'checked sample ids tex-includegraphics-1 and tex-includegraphics-2 against the source file; no compile.'
+)
+
+
+def test_limitation_batch_applies_to_matching_unresolved_only(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'tex-includegraphics-1', 'message': 'fig 1', 'resolution': None},
+        {'id': 'tex-includegraphics-2', 'message': 'fig 2', 'resolution': None},
+        {'id': 'tex-includegraphics-3', 'message': 'fig 3', 'resolution': None},
+        {'id': 'tex-includegraphics-99', 'message': 'already', 'resolution': 'already resolved previously by hand'},
+        {'id': 'image-b00001', 'message': 'remote or missing', 'resolution': None},
+    ])
+    saved = send(seeded, 'resolve', limitations=[{
+        'category': 'tex-includegraphics',
+        'resolution': _LIMITATION_RESOLUTION,
+        'evidence': _LIMITATION_EVIDENCE,
+    }])
+    by_id = {item['id']: item for item in saved['issues']}
+    for key in ('tex-includegraphics-1', 'tex-includegraphics-2', 'tex-includegraphics-3'):
+        assert by_id[key]['resolution'] == _LIMITATION_RESOLUTION
+        assert by_id[key]['resolution_evidence'] == _LIMITATION_EVIDENCE
+        assert by_id[key]['resolved_by'] == 'limitation_batch'
+    assert by_id['tex-includegraphics-99']['resolution'] == 'already resolved previously by hand'
+    assert by_id['tex-includegraphics-99'].get('resolved_by') is None
+    assert by_id['image-b00001']['resolution'] is None
+    aliased = send(saved, 'resolve_limitations', limitations=[{
+        'category': 'image',
+        'resolution': 'HTML/Markdown remote or missing images are not fetched; local-archive product limit.',
+        'evidence': 'checked sample image-b00001; source file has a missing local image path.',
+    }])
+    image = next(item for item in aliased['issues'] if item['id'] == 'image-b00001')
+    assert image['resolution'].startswith('HTML/Markdown')
+    assert image['resolved_by'] == 'limitation_batch'
+    assert next(item for item in aliased['issues'] if item['id'] == 'tex-includegraphics-99')['resolution'] == (
+        'already resolved previously by hand'
+    )
+
+
+def test_limitation_batch_rejects_empty_or_weak_evidence(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'tex-includegraphics-1', 'message': 'fig', 'resolution': None},
+    ])
+    base = {'category': 'tex-includegraphics', 'resolution': _LIMITATION_RESOLUTION}
+    with pytest.raises(ValueError, match='evidence'):
+        send(seeded, 'resolve', limitations=[{**base}])
+    for evidence in (
+        '',
+        '   ',
+        'too short to count',
+        'ignore',
+        '跳过',
+        'ignore ignore ignore ignore ignore ignore ignore',
+        '已知限制已知限制已知限制已知限制已知限制',
+        'x' * 24,
+    ):
+        with pytest.raises(ValueError):
+            send(seeded, 'resolve', limitations=[{**base, 'evidence': evidence}])
+    with pytest.raises(ValueError, match='explicit resolution'):
+        send(seeded, 'resolve', issues=[{'id': 'tex-includegraphics-1', 'resolution': '  '}])
+    leftover = store.read(seeded['id'])['issues']
+    assert leftover[0]['resolution'] is None
+
+
+def test_limitation_batch_rejects_disallowed_body_categories(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'page-1', 'message': 'scan', 'resolution': None},
+        {'id': 'docx-sym-1', 'message': 'unknown symbol', 'resolution': None},
+    ])
+    body = {
+        'resolution': 'Inspected original pages and recorded an unreadable-body limitation for honesty.',
+        'evidence': 'checked sample page-1 against the scanned source file; encoding is garbled.',
+    }
+    with pytest.raises(ValueError, match='page'):
+        send(seeded, 'resolve', limitations=[{'category': 'page', **body}])
+    with pytest.raises(ValueError, match='docx-sym'):
+        send(seeded, 'resolve', limitations=[{'category': 'docx-sym', **body}])
+    frozen = store.read(seeded['id'])
+    assert all(item['resolution'] is None for item in frozen['issues'])
+    long_res = (
+        'Inspected original page PNG; body text is an unreadable scan and OCR is outside product scope.'
+    )
+    saved = send(seeded, 'resolve', issues=[{'id': 'page-1', 'resolution': long_res}])
+    by_id = {item['id']: item for item in saved['issues']}
+    assert by_id['page-1']['resolution'] == long_res
+    assert by_id['docx-sym-1']['resolution'] is None
+
+
+def test_limitation_batch_rejects_unknown_category_and_zero_matches(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+    ])
+    good = {
+        'resolution': 'HTML remote image is not fetched; this is the local-archive product limit.',
+        'evidence': 'checked sample image-b00001; source file has a remote src and missing local file.',
+    }
+    with pytest.raises(ValueError, match='issues and/or limitations'):
+        send(seeded, 'resolve')
+    with pytest.raises(ValueError, match='Unknown or disallowed'):
+        send(seeded, 'resolve', limitations=[{'category': 'not-a-real-kind', **good}])
+    with pytest.raises(ValueError, match='category is required'):
+        send(seeded, 'resolve', limitations=[{'category': '  ', **good}])
+    with pytest.raises(ValueError, match='No unresolved issues match'):
+        send(seeded, 'resolve', limitations=[{'category': 'tex-input', **good}])
+    assert next(item for item in store.read(seeded['id'])['issues'] if item['id'] == 'image-b00001')['resolution'] is None
+
+
+def test_limitation_batch_validate_still_lists_unresolved_body_issues(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+        {'id': 'tex-includegraphics-1', 'message': 'fig', 'resolution': None},
+        {'id': 'page-1', 'message': 'scan', 'resolution': None},
+    ])
+    saved = send(seeded, 'resolve', limitations=[
+        {
+            'category': 'image',
+            'resolution': 'Markdown missing image is not fetched; local-archive product known limit.',
+            'evidence': 'checked sample image-b00001; source file has a missing local image.',
+        },
+        {
+            'category': 'tex-includegraphics',
+            'resolution': _LIMITATION_RESOLUTION,
+            'evidence': _LIMITATION_EVIDENCE,
+        },
+    ])
+    errors = validate(saved)['errors']
+    assert any('page-1' in item for item in errors)
+    assert not any('image-b00001' in item or 'tex-includegraphics-1' in item for item in errors)
+    resolved = send(saved, 'resolve', issues=[{
+        'id': 'page-1',
+        'resolution': 'Inspected page PNG; body text is an unreadable scan and stays an explicit per-id limit.',
+    }])
+    leftover = [item for item in validate(resolved)['errors'] if 'Unresolved extraction issue' in item]
+    assert leftover == []

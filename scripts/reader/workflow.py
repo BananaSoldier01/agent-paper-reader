@@ -121,6 +121,124 @@ def _issue_prefix(issue):
     return re.sub(r'-(?:\d+|[ab]\d+)$', '', iid) or iid
 
 
+LIMITATION_CATEGORIES = {
+    'tex-includegraphics', 'tex-input', 'tex-env', 'tex-unclosed',
+    'image', 'docx-ole', 'docx-omath', 'docx-image', 'docx-crop',
+}
+_LIMITATION_PER_ID_ONLY = {'page', 'docx-sym'}
+_WEAK_FILLER_EXACT = {
+    'ignore', 'skip', 'n/a', 'na', 'ok', 'done', 'resolved', 'limitation',
+    '已知限制', '忽略', '跳过',
+}
+_WEAK_EN_TOKENS = {
+    'ignore', 'skip', 'na', 'ok', 'done', 'resolved', 'limitation', 'limitations', 'known',
+}
+_WEAK_PHRASES = ('known limitation', 'known-limitation', 'n/a', '已知限制', '忽略', '跳过')
+_EVIDENCE_HINTS = (
+    'sample', 'checked', 'inspected', 'confirmed', 'source', 'file', 'missing',
+    'remote', 'not embedded', 'single-file', 'no compile', '核对', '确认', '源', '缺',
+)
+_ISSUE_ID_LIKE = re.compile(r'(?:[a-z][a-z0-9]*)(?:-[a-z][a-z0-9]*)*-(?:\d+|[ab]\d+)', re.I)
+_LIMITATION_MIN_LEN = 24
+
+
+def _is_weak_filler(text):
+    folded = text.strip().casefold()
+    if folded in _WEAK_FILLER_EXACT:
+        return True
+    tmp = folded
+    for phrase in _WEAK_PHRASES:
+        tmp = tmp.replace(phrase, ' ')
+    leftover_en = [tok for tok in re.findall(r'[a-z0-9]+', tmp) if tok not in _WEAK_EN_TOKENS]
+    leftover_cjk = ''.join(ch for ch in tmp if '\u4e00' <= ch <= '\u9fff')
+    return len(''.join(leftover_en) + leftover_cjk) < 8
+
+
+def _has_concrete_evidence(text):
+    folded = text.casefold()
+    if re.search(r'\d', folded) or _ISSUE_ID_LIKE.search(folded):
+        return True
+    return any(hint.casefold() in folded for hint in _EVIDENCE_HINTS)
+
+
+def _limitation_text(value, field):
+    if not isinstance(value, str):
+        raise ValueError(f'limitation {field} must be a string')
+    text = value.strip()
+    if len(text) < _LIMITATION_MIN_LEN:
+        raise ValueError(f'limitation {field} must be at least {_LIMITATION_MIN_LEN} characters')
+    if _is_weak_filler(text):
+        raise ValueError(f'limitation {field} is too weak; write a concrete known-limitation explanation')
+    return text
+
+
+def _limitation_category(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError('limitation category is required')
+    category = value.strip()
+    if category in _LIMITATION_PER_ID_ONLY:
+        raise ValueError(
+            f'Limitation category {category} cannot be batch-resolved; '
+            'unreadable or garbled body text needs per-id issues or must stay unresolved'
+        )
+    if category not in LIMITATION_CATEGORIES:
+        raise ValueError(f'Unknown or disallowed limitation category: {category}')
+    return category
+
+
+def _resolve_limitations(doc, limitations):
+    if not isinstance(limitations, list):
+        raise ValueError('limitations must be a list')
+    prepared, seen = [], set()
+    for entry in limitations:
+        if not isinstance(entry, dict):
+            raise ValueError('each limitations entry must be an object')
+        category = _limitation_category(entry.get('category'))
+        if category in seen:
+            raise ValueError(f'Duplicate limitation category: {category}')
+        seen.add(category)
+        resolution = _limitation_text(entry.get('resolution'), 'resolution')
+        evidence = _limitation_text(entry.get('evidence'), 'evidence')
+        if not _has_concrete_evidence(evidence):
+            raise ValueError(
+                'limitation evidence must cite a sample id, a digit, or a concrete check '
+                '(sample/checked/inspected/confirmed/source/file/missing/remote/核对/确认/源/缺)'
+            )
+        matches = [issue for issue in doc.get('issues') or []
+                   if not issue.get('resolution') and _issue_prefix(issue) == category]
+        if not matches:
+            raise ValueError(f'No unresolved issues match limitation category: {category}')
+        prepared.append((matches, resolution, evidence))
+    for matches, resolution, evidence in prepared:
+        for issue in matches:
+            issue['resolution'] = resolution
+            issue['resolution_evidence'] = evidence
+            issue['resolved_by'] = 'limitation_batch'
+
+
+def _resolve_extraction_issues(doc, payload, op):
+    issues = payload.get('issues')
+    limitations = payload.get('limitations')
+    if op == 'resolve_limitations':
+        if not limitations:
+            raise ValueError('resolve_limitations requires a non-empty limitations list')
+        _resolve_limitations(doc, limitations)
+        return
+    has_issues = isinstance(issues, list) and len(issues) > 0
+    has_limitations = isinstance(limitations, list) and len(limitations) > 0
+    if limitations is not None and not isinstance(limitations, list):
+        raise ValueError('limitations must be a list')
+    if not has_issues and not has_limitations:
+        raise ValueError('resolve requires issues and/or limitations')
+    if has_limitations:
+        _resolve_limitations(doc, limitations)
+    if has_issues:
+        for item in issues:
+            if not item['resolution'].strip():
+                raise ValueError('Extraction issue requires explicit resolution/limitation')
+            next(i for i in doc['issues'] if i['id'] == item['id'])['resolution'] = item['resolution']
+
+
 def issue_summary(doc, unresolved_only=False, samples=3):
     grouped = {}
     for issue in doc.get('issues') or []:
@@ -530,11 +648,8 @@ def submit(doc_id, payload):
             b['asset'] = asset
             b['structure_note'] += '\n' + payload['note']
             doc['full_review'] = None
-        elif op=='resolve':
-            for item in payload['issues']:
-                if not item['resolution'].strip():
-                    raise ValueError('Extraction issue requires explicit resolution/limitation')
-                next(i for i in doc['issues'] if i['id']==item['id'])['resolution']=item['resolution']
+        elif op in ('resolve', 'resolve_limitations'):
+            _resolve_extraction_issues(doc, payload, op)
         elif op=='full_review':
             if payload['fingerprint'] != fingerprint(doc):
                 raise ValueError('Whole review fingerprint stale')

@@ -58,7 +58,12 @@
 {"revision":3,"submission_id":"review-1","agent":"current agent","operation":"review","blocks":[{"id":"b00001","translation_hash":"show --full 或当前批次投影返回的哈希","note":"第二轮核对原文含义和条件","difference_explanation":"仅在存在具体差异时说明换算或原因"}]}
 ```
 全文复核：`operation: full_review`，附 `fingerprint`（取 progress）、`note`。
-来源问题：`operation: resolve`，附 `issues: [{"id":"page-3","resolution":"实际检查结果和处理方式"}]`；无法识读则保持未解决，不可仅写跳过。
+来源问题：`operation: resolve`，至少提供 `issues` 或 `limitations` 之一（可同时给）。逐条仍为 `issues: [{"id":"page-3","resolution":"实际检查结果和处理方式"}]`；空或空白 resolution 拒绝。无法识读的正文保持未解决，不可仅写跳过。
+
+按类已知限制用同一 operation 的 `limitations`（`operation: resolve_limitations` 是只使用 `limitations` 的别名）。每条含非空 `category`、`resolution`、`evidence`；后两项去空白后均不少于 24 字，不能只是 `ignore` / `skip` / `n/a` / `ok` / `done` / `resolved` / `limitation` / `已知限制` / `忽略` / `跳过` 等套话。`evidence` 还须含数字、issue id 样例，或具体核对词（`sample` / `checked` / `inspected` / `confirmed` / `source` / `file` / `missing` / `remote` / `not embedded` / `single-file` / `no compile` / `核对` / `确认` / `源` / `缺`）。按 issue id 前缀（去掉末尾的 `-数字` 或 `-a/-b` 加数字；若 issue 自带 `type` 则用 type）匹配**当前未解决**项，写入同一 `resolution`（并记录 `resolution_evidence` / `resolved_by=limitation_batch`）；已解决项和其他类不动。该类零匹配则失败。允许的 category 仅：`tex-includegraphics`、`tex-input`、`tex-env`、`tex-unclosed`、`image`、`docx-ole`、`docx-omath`、`docx-image`、`docx-crop`。`page`（扫描/低文本/编码）和 `docx-sym`（正文未知符号）禁止按类批处理，只能逐条 `issues` 或保持未解决。没有按文档清空全部 issues 的接口。
+```json
+{"revision":4,"submission_id":"resolve-lim-1","agent":"current agent","operation":"resolve","limitations":[{"category":"tex-includegraphics","resolution":"单文件 TeX 不编译，\\includegraphics 未嵌入，属产品已知边界。","evidence":"核对 sample tex-includegraphics-1、tex-includegraphics-2，源文件无编译步骤。"}]}
+```
 
 用户 HTTP 编辑使用 `POST /api/documents/ID/edit`，携带会话令牌 `X-Reader-Token` 和 revision。operation 为 `note/delete_note/translation/term/reading`。令牌由同源 `/api/session` 返回，只保存在运行内存；无 CORS、默认仅回环地址，非本地主机名拒绝。此服务不是多用户权限系统，不应暴露公网。
 
