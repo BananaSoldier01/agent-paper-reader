@@ -87,7 +87,7 @@ https://github.com/BananaSoldier01/agent-paper-reader
 
 Read the repository README and SKILL.md first, then install the complete
 Skill from the current main branch using a method supported by this Agent.
-For multiple input formats, do not install the old v0.1.0 package.
+For multiple input formats, use the v0.2.0 slim install zip or main source; do not install the PDF/Markdown-only v0.1.0 package.
 Confirm the appropriate installation directory and check prerequisites,
 including Python 3.12+. Preserve existing configuration and document data.
 When finished, tell me where it is installed, whether it is ready to use,
@@ -119,7 +119,7 @@ Missing dependencies, failed conversion, or unreliable output leave the original
 
 For the multiple input formats listed here, download the [main source ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip), extract it, and place the complete source directory in your Agent's Skill directory under the name `agent-paper-reader`.
 
-The [v0.1.0 compact package](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) is an older version with PDF / Markdown inputs only. Updating main does not change that release asset.
+The [v0.2.0 slim install zip](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.2.0/agent-paper-reader.zip) includes txt/html/docx/tex and matches this release. The [v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) zip remains PDF/Markdown only.
 
 This repository is also a complete Skill, with [SKILL.md](SKILL.md) as its entry point. You can install the full repository contents; **do not copy only SKILL.md**. For a project supporting `.agents/skills`:
 
