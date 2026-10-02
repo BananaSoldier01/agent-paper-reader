@@ -8,6 +8,7 @@ from reader import store
 from reader.importer import import_document
 from reader.workflow import (
     submit, user_edit, tasks, validate, fingerprint, note_status, project_document, _short_resolution,
+    assemble_payload, pending_counts, DEFAULT_TASK_LIMIT, DEFAULT_SECTION_CONTEXT_LIMIT,
 )
 from reader.store import digest, Conflict
 from reader.server import app, TOKEN
@@ -172,7 +173,9 @@ def test_translation_projection_keeps_section_without_atoms_or_issue_bodies():
         atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
         blocks.append({'id': f'b{i:05d}', 'kind': kind, 'text': text, 'source_ids': [f'a{i:05d}'], 'asset': None,
                        'translation': {'text': '译文', 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]} if i == 0 else None,
-                       'history': [], 'review': None, 'structure_note': 'kept', 'user_edited': False})
+                       'history': [{'translation': {'text': 'HISTORY_BLOB_' + 'h'*500}, 'author': 'agent'}] if i == 1 else [],
+                       'review': None, 'structure_note': 'STRUCTURE_NOTE_BLOB_' + 's'*400, 'source_change': 'SOURCE_CHANGE_BLOB',
+                       'user_edited': False})
     unresolved = 'UNRESOLVED_BODY_' + 'x'*400
     resolved = 'RESOLVED_BODY_' + 'y'*400
     doc = {'schema_version': 1, 'id': 'b'*24, 'title': 'Terms', 'source_file': 'source.md', 'revision': 3,
@@ -190,6 +193,14 @@ def test_translation_projection_keeps_section_without_atoms_or_issue_bodies():
     assert any(b.get('translation_hash') for b in view['section_context'])
     assert view['issue_summary']['unresolved'] == 1
     assert tasks(doc)['stage'] == 'translate'
+    kept = {'id', 'kind', 'text', 'source_ids', 'asset', 'translation', 'translation_hash', 'review', 'user_edited', 'has_structure_note'}
+    assert all(set(b) == kept for b in view['blocks'] + view['context'] + view['section_context'])
+    assert all(b['has_structure_note'] is True for b in view['blocks'])
+    assert 'HISTORY_BLOB_' not in dumped and 'STRUCTURE_NOTE_BLOB_' not in dumped and 'SOURCE_CHANGE_BLOB' not in dumped
+    full_tasks = project_document(doc, full=True, view='tasks', limit=8)
+    full_dump = json.dumps(full_tasks, ensure_ascii=False)
+    assert 'HISTORY_BLOB_' in full_dump and 'STRUCTURE_NOTE_BLOB_' in full_dump
+    assert 'history' in full_tasks['blocks'][1]
 
 
 def test_cli_projection_and_full_switch(tmp_path, monkeypatch, capsys):
@@ -705,6 +716,11 @@ def test_public_document_and_export_keep_limitation_warnings(doc, tmp_path, monk
     assert 'tex-includegraphics-1' in html
 
 
+def _repetitive_pending_error(message):
+    import re
+    return re.match(r'^\S+: (?:missing\b.*|second-pass review required)$', message) is not None
+
+
 def test_default_progress_summarizes_large_limitation_batches(doc):
     tex_resolution = (
         'TEX_RESOLUTION_BLOB Single-file TeX does not compile; includegraphics assets stay unembedded as a product limit. '
@@ -749,7 +765,16 @@ def test_default_progress_summarizes_large_limitation_batches(doc):
     assert 'tex-includegraphics-300' not in view_json and 'tex-includegraphics-4' not in view_json
     assert len(view_json.encode('utf-8')) < 10_000
     assert len(view_json.encode('utf-8')) * 20 < len(full_json.encode('utf-8'))
-    assert view['ok'] == checked['ok'] and view['errors'] == checked['errors']
+    assert view['ok'] == checked['ok']
+    structural = [item for item in checked['errors'] if not _repetitive_pending_error(item)]
+    assert structural and view['errors'] == structural and view['errors'] != checked['errors']
+    assert not any('missing translation' in item for item in view['errors'])
+    assert any('missing translation' in item for item in checked['errors'])
+    missing = view['error_summary']['by_kind']['missing translation']
+    assert view['error_summary']['total'] == len(checked['errors']) - len(structural)
+    assert missing['count'] == sum(item.endswith(': missing translation') for item in checked['errors'])
+    assert missing['sample_ids'] and len(missing['sample_ids']) <= 5
+    assert view['pending_translate'] == missing['count'] and view['pending_review'] == 0
     assert view['blocks'] == checked['blocks'] and view['translated'] == checked['translated']
     assert view['reviewed'] == checked['reviewed']
     summary = view['confirmed_limitations_summary']
@@ -779,6 +804,7 @@ def test_default_progress_summarizes_large_limitation_batches(doc):
 
     assert 'projection' not in full and 'outline_length' not in full
     assert 'confirmed_limitations_summary' not in full and 'warning_summary' not in full
+    assert 'error_summary' not in full and 'pending_translate' not in full and 'pending_review' not in full
     assert full['confirmed_limitations'] == checked['confirmed_limitations']
     assert full['warnings'] == checked['warnings'] and full['errors'] == checked['errors']
     assert len(full['confirmed_limitations']) == 302
@@ -794,3 +820,232 @@ def test_default_progress_summarizes_large_limitation_batches(doc):
     assert full_json.count(tex_evidence) == 300
     assert any('tex-includegraphics-300 [tex-includegraphics]' in item for item in full['warnings'])
     assert any(item == 'Note n-orphan needs reattachment' for item in full['warnings'])
+
+
+def _batch_doc(n=20):
+    atoms, blocks = [], []
+    for i in range(n):
+        text = f'word {i}'
+        atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
+        blocks.append({'id': f'b{i:05d}', 'kind': 'paragraph', 'text': text, 'source_ids': [f'a{i:05d}'],
+                       'asset': None, 'translation': None, 'history': [], 'review': None,
+                       'structure_note': 'kept', 'user_edited': False})
+    return {'schema_version': 1, 'id': 'e'*24, 'title': 'Batch', 'source_file': 'source.md', 'revision': 2,
+            'stage': 'translate', 'atoms': atoms, 'blocks': blocks, 'terms': [], 'notes': [],
+            'structure_review': {'agent': 'a', 'note': 'n'}, 'terms_review': {'agent': 'a', 'note': 'n'},
+            'full_review': None, 'issues': []}
+
+
+def test_default_task_batch_is_sixteen():
+    doc = _batch_doc(20)
+    assert DEFAULT_TASK_LIMIT == 16 and DEFAULT_SECTION_CONTEXT_LIMIT == 24
+    assert len(tasks(doc)['blocks']) == 16
+    assert len(project_document(doc, view='tasks')['blocks']) == 16
+    assert len(project_document(doc, view='show')['blocks']) == 16
+    assert [b['id'] for b in project_document(doc, view='tasks', limit=8)['blocks']] == [f'b{i:05d}' for i in range(8)]
+
+
+def test_progress_collapses_missing_review_but_validate_lists_them(doc):
+    saved = translated(doc)
+    view = project_document(saved, view='progress')
+    full = project_document(saved, view='progress', full=True)
+    checked = validate(saved)
+    assert full['errors'] == checked['errors']
+    assert any(item.endswith(': second-pass review required') for item in checked['errors'])
+    assert not any('second-pass review required' in item for item in view['errors'])
+    assert 'Current whole-document review required' in view['errors']
+    kind = view['error_summary']['by_kind']['second-pass review required']
+    countable = [b for b in saved['blocks'] if b['kind'] not in {'figure', 'formula', 'code', 'page', 'excluded'}]
+    assert kind['count'] == len(countable)
+    assert kind['sample_messages'][0].endswith(': second-pass review required')
+    assert view['pending_translate'] == 0 and view['pending_review'] == len(countable)
+    assert pending_counts(saved) == {'pending_translate': 0, 'pending_review': len(countable)}
+
+
+def test_progress_keeps_alignment_and_number_errors(doc):
+    saved = translated(doc)
+    block = saved['blocks'][1]
+    saved = user_edit(saved['id'], {'revision': saved['revision'], 'operation': 'translation',
+                                    'block_id': block['id'], 'pair_id': 'g1', 'text': '6 MW'})
+    view = project_document(saved, view='progress')
+    checked = validate(saved)
+    assert view['ok'] is False and view['ok'] == checked['ok']
+    assert any('unexplained differences' in item for item in view['errors'])
+    assert any('unexplained differences' in item for item in checked['errors'])
+    assert any('second-pass review required' in item for item in checked['errors'])
+    assert not any('second-pass review required' in item for item in view['errors'])
+
+
+def test_assemble_binds_revision_and_keeps_agent_hash(doc):
+    before = doc['revision']
+    block = doc['blocks'][0]
+    item = {'id': block['id'], 'translation': {'text': '标题', 'pairs': [
+        {'id': 'g1', 'source': [[0, len(block['text'])]], 'target': [[0, 2]]}]}}
+    payload = assemble_payload(doc, 'translate', [item], 'asm-tr', 'agent name')
+    assert payload['revision'] == before
+    assert payload['submission_id'] == 'asm-tr' and payload['agent'] == 'agent name'
+    assert payload['operation'] == 'translate' and payload['blocks'] == [item]
+    assert store.read(doc['id'])['revision'] == before
+
+    reviewed = translated(doc)
+    target = reviewed['blocks'][0]
+    filled = assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'second pass'}], 'asm-rv', 'agent name')
+    assert filled['revision'] == reviewed['revision']
+    assert filled['blocks'][0]['translation_hash'] == digest(target['translation'])
+    assert filled['blocks'][0]['note'] == 'second pass'
+    kept = assemble_payload(reviewed, 'review', [{
+        'id': target['id'], 'translation_hash': 'deadbeef', 'note': 'kept',
+    }], 'asm-keep', 'agent name')
+    assert kept['blocks'][0]['translation_hash'] == 'deadbeef'
+    blank = assemble_payload(reviewed, 'review', [{
+        'id': target['id'], 'translation_hash': '', 'note': 'fill me',
+    }], 'asm-blank', 'agent name')
+    assert blank['blocks'][0]['translation_hash'] == digest(target['translation'])
+    missing_note = assemble_payload(reviewed, 'review', [{'id': target['id']}], 'asm-nonote', 'agent name')
+    with pytest.raises(ValueError, match='Review evidence'):
+        submit(reviewed['id'], missing_note)
+    with pytest.raises(ValueError, match='no current translation'):
+        assemble_payload(doc, 'review', [{'id': block['id'], 'note': 'too early'}], 'asm-early', 'agent name')
+
+
+def test_cli_limit_pretty_assemble_and_submit_counts(doc, monkeypatch, capsys, tmp_path):
+    from reader.cli import main
+
+    def run(*argv):
+        monkeypatch.setattr(sys, 'argv', ['paper', *argv])
+        try:
+            main()
+            code = 0
+        except SystemExit as exc:
+            code = exc.code
+        return code, capsys.readouterr().out
+
+    wide = tmp_path/'wide.md'
+    wide.write_text('\n\n'.join(f'Paragraph {i} has enough words to be its own block.' for i in range(20)), encoding='utf-8')
+    code, raw = run('import', str(wide))
+    assert code == 0 and '\n' not in raw.strip() and raw.startswith('{"ok":true,')
+    imported = json.loads(raw)['result']
+    code, raw = run('tasks', imported['document_id'])
+    assert code == 0 and '\n' not in raw.strip()
+    assert len(json.loads(raw)['result']['blocks']) == 16
+    code, raw = run('tasks', imported['document_id'], '--limit', '4')
+    assert len(json.loads(raw)['result']['blocks']) == 4
+    code, pretty = run('tasks', imported['document_id'], '--limit', '2', '--pretty')
+    assert pretty.startswith('{\n') and '\n  "ok"' in pretty
+    assert len(json.loads(pretty)['result']['blocks']) == 2
+
+    code, raw = run('validate', doc['id'])
+    assert code == 2 and '\n' not in raw.strip()
+    validated = json.loads(raw)['result']
+    assert validated['ok'] is False and any(item.endswith(': missing translation') for item in validated['errors'])
+    code, raw = run('progress', doc['id'], '--full')
+    full_progress = json.loads(raw)['result']
+    assert code == 0 and full_progress['errors'] == validated['errors']
+    assert 'error_summary' not in full_progress and 'pending_translate' not in full_progress
+    code, raw = run('progress', doc['id'])
+    projected = json.loads(raw)['result']
+    assert projected['errors'] != validated['errors']
+    assert not any(item.endswith(': missing translation') for item in projected['errors'])
+    assert projected['error_summary']['by_kind']['missing translation']['count'] == sum(
+        item.endswith(': missing translation') for item in validated['errors'])
+    assert projected['pending_translate'] == projected['error_summary']['by_kind']['missing translation']['count']
+
+    block = doc['blocks'][0]
+    blocks_path = tmp_path/'blocks.json'
+    blocks_path.write_text(json.dumps([{'id': block['id'], 'translation': {'text': '标题', 'pairs': [
+        {'id': 'g1', 'source': [[0, len(block['text'])]], 'target': [[0, 2]]}]}}], ensure_ascii=False), encoding='utf-8')
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-default', '--agent', 'tester')
+    assert code == 0
+    default_result = json.loads(raw)['result']
+    default_path = store.ROOT / 'submissions' / f'{doc["id"]}-translate-cli-default.json'
+    assert default_result['path'] == str(default_path) and default_path.is_file()
+    assert json.loads(default_path.read_text(encoding='utf-8'))['revision'] == doc['revision']
+    out = tmp_path/'payload.json'
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-asm', '--agent', 'tester', '--out', str(out))
+    assert code == 0
+    result = json.loads(raw)['result']
+    assert result['path'] == str(out) and result['revision'] == doc['revision']
+    assert result['operation'] == 'translate' and result['block_count'] == 1
+    written = json.loads(out.read_text(encoding='utf-8'))
+    assert written['revision'] == doc['revision'] and written['blocks'][0]['translation']['text'] == '标题'
+    assert store.read(doc['id'])['revision'] == doc['revision']
+    code, raw = run('submit', doc['id'], str(out))
+    assert code == 0 and '\n' not in raw.strip()
+    submitted = json.loads(raw)['result']
+    assert submitted['revision'] == doc['revision'] + 1
+    assert submitted['stage'] == 'translate'
+    assert submitted['pending_translate'] == len(doc['blocks']) - 1
+    assert submitted['pending_review'] == 1
+    assert 'blocks' not in submitted and 'atoms' not in submitted
+
+
+def test_projection_json_size_microbenchmark(doc):
+    # 80 pending blocks, each with two ~2.6k-char history entries and a repeated structure note.
+    # Measured compact UTF-8 JSON on this fixture: tasks blocks at limit 16 are 4208 B without
+    # history vs 116672 B with history (~27.7x). Default tasks view is 15618 B vs 416271 B when
+    # history is restored on blocks/context/section_context (~26.7x). Default progress is 1023 B
+    # vs progress --full 2801 B (~2.7x) while 80 missing-translation lines are listed in full.
+    n = 80
+    history_text = 'PREVIOUS TRANSLATION ' * 120
+    note = 'Checked structure against the source page and kept the extracted order. ' * 12
+
+    def expand(current):
+        atoms, blocks = [], []
+        for i in range(n):
+            text = f'Paragraph {i:03d} reports 12.5 kW at 400 K under steady load. '
+            atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i, 'end': i + 1}})
+            blocks.append({
+                'id': f'b{i:05d}', 'kind': 'paragraph', 'text': text, 'source_ids': [f'a{i:05d}'],
+                'asset': None, 'translation': None,
+                'history': [
+                    {'translation': {'text': history_text, 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]}, 'author': 'agent'},
+                    {'translation': {'text': history_text + ' v2', 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]}, 'author': 'agent'},
+                ],
+                'review': None, 'structure_note': note, 'source_change': note, 'user_edited': False,
+            })
+        current['atoms'] = atoms
+        current['blocks'] = blocks
+        current['issues'] = []
+
+    saved = store.mutate(doc['id'], doc['revision'], expand)
+    view = project_document(saved, view='tasks')
+    assert len(view['blocks']) == 16
+    assert all('history' not in block and 'structure_note' not in block for block in view['blocks'])
+    by_id = {block['id']: block for block in saved['blocks']}
+
+    def inflate(rows):
+        fat = []
+        for row in rows:
+            block = dict(by_id[row['id']])
+            block['translation_hash'] = None
+            fat.append(block)
+        return fat
+
+    slim_blocks = len(json.dumps(view['blocks'], ensure_ascii=False).encode())
+    fat_blocks = len(json.dumps(inflate(view['blocks']), ensure_ascii=False).encode())
+    slim_view = len(json.dumps(view, ensure_ascii=False).encode())
+    fat_view = len(json.dumps({
+        **view,
+        'blocks': inflate(view['blocks']),
+        'context': inflate(view['context']),
+        'section_context': inflate(view['section_context']),
+    }, ensure_ascii=False).encode())
+    assert slim_blocks * 8 < fat_blocks, (slim_blocks, fat_blocks)
+    assert slim_view * 8 < fat_view, (slim_view, fat_view)
+
+    progress = project_document(saved, view='progress')
+    progress_full = project_document(saved, view='progress', full=True)
+    checked = validate(saved)
+    assert progress_full['errors'] == checked['errors']
+    assert progress['pending_translate'] == n and progress['pending_review'] == 0
+    missing = progress['error_summary']['by_kind']['missing translation']
+    assert missing['count'] == n and len(missing['sample_ids']) == 5
+    assert len(progress['errors']) < 5
+    assert sum(item.endswith(': missing translation') for item in progress_full['errors']) == n
+    assert all(f'b{i:05d}: missing translation' in progress_full['errors'] for i in (0, n - 1))
+    prog_bytes = len(json.dumps(progress, ensure_ascii=False).encode())
+    full_bytes = len(json.dumps(progress_full, ensure_ascii=False).encode())
+    assert prog_bytes * 2 < full_bytes, (prog_bytes, full_bytes, slim_blocks, fat_blocks, slim_view, fat_view)
+

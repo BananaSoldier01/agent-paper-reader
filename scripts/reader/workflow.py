@@ -122,6 +122,22 @@ def _stage_and_pending(doc):
     return stage, pending
 
 
+def pending_counts(doc):
+    # Independent of the current stage so a partial translate still shows both queues.
+    # Untranslated blocks are not also counted as pending review.
+    translate = review = 0
+    for block in doc['blocks']:
+        if block['kind'] in VERBATIM:
+            continue
+        if not block.get('translation'):
+            translate += 1
+            continue
+        review_obj = block.get('review') or {}
+        if review_obj.get('translation_hash') != digest(block['translation']):
+            review += 1
+    return {'pending_translate': translate, 'pending_review': review}
+
+
 def _issue_prefix(issue):
     kind = issue.get('type')
     if isinstance(kind, str) and kind.strip():
@@ -312,8 +328,10 @@ def _block_summary(block, width=160):
 
 
 def _public_block(block):
-    shown = dict(block)
+    # Default translate/review/terms projection. History and the long structure_note stay on disk and in --full.
+    shown = {key: block.get(key) for key in ('id', 'kind', 'text', 'source_ids', 'asset', 'translation', 'review', 'user_edited')}
     shown['translation_hash'] = digest(block['translation']) if block.get('translation') else None
+    shown['has_structure_note'] = bool(str(block.get('structure_note') or '').strip())
     return shown
 
 
@@ -333,6 +351,7 @@ def _projection_meta(doc, stage):
             'source_file': doc.get('source_file'), 'schema_version': doc.get('schema_version')}
 
 
+DEFAULT_TASK_LIMIT = 16
 DEFAULT_SECTION_CONTEXT_LIMIT = 24
 
 
@@ -386,7 +405,7 @@ def _window(doc, chosen, *, section_limit=None, section_offset=None):
     return context, returned, window
 
 
-def _tasks_view(doc, limit=8, full=False, stage=None, section_limit=None, section_offset=None):
+def _tasks_view(doc, limit=DEFAULT_TASK_LIMIT, full=False, stage=None, section_limit=None, section_offset=None):
     computed, pending = _stage_and_pending(doc)
     stage = computed if full else (stage or computed)
     chosen = (doc['blocks'] if stage == 'structure' else pending)[:limit]
@@ -409,7 +428,7 @@ def _tasks_view(doc, limit=8, full=False, stage=None, section_limit=None, sectio
             'section_context': [_public_block(b) for b in section], 'section_window': window}
 
 
-def tasks(doc, limit=8, full=False, section_limit=None, section_offset=None):
+def tasks(doc, limit=DEFAULT_TASK_LIMIT, full=False, section_limit=None, section_offset=None):
     return _tasks_view(doc, limit, full=full, section_limit=section_limit, section_offset=section_offset)
 
 
@@ -421,7 +440,7 @@ def _show_full(doc):
     return result
 
 
-def _show_view(doc, full=False, stage=None, limit=8, section_limit=None, section_offset=None):
+def _show_view(doc, full=False, stage=None, limit=DEFAULT_TASK_LIMIT, section_limit=None, section_offset=None):
     if full:
         return _show_full(doc)
     computed, _pending = _stage_and_pending(doc)
@@ -473,6 +492,33 @@ def _progress_warning_projection(warnings, summary):
     return other + notes, warning_summary
 
 
+# Per-block pending lines repeat once per block. Projection only; validate() keeps the full list.
+_REPETITIVE_PENDING_ERROR = re.compile(r'^(?P<id>\S+): (?P<detail>missing\b.*|second-pass review required)$')
+_PROGRESS_ERROR_SAMPLES = 5
+
+
+def _progress_error_projection(errors, samples=_PROGRESS_ERROR_SAMPLES):
+    other = []
+    by_kind = {}
+    for message in errors or []:
+        text = message if isinstance(message, str) else str(message)
+        match = _REPETITIVE_PENDING_ERROR.match(text)
+        if not match:
+            other.append(message)
+            continue
+        detail = match.group('detail')
+        bucket = by_kind.get(detail)
+        if bucket is None:
+            bucket = {'count': 0, 'sample_ids': [], 'sample_messages': []}
+            by_kind[detail] = bucket
+        bucket['count'] += 1
+        if len(bucket['sample_ids']) < samples:
+            bucket['sample_ids'].append(match.group('id'))
+            bucket['sample_messages'].append(text)
+    total = sum(bucket['count'] for bucket in by_kind.values())
+    return other, {'total': total, 'by_kind': by_kind}
+
+
 def _progress_view(doc, full=False):
     summary = validate(doc)
     if full:
@@ -482,17 +528,21 @@ def _progress_view(doc, full=False):
     unresolved = sum(1 for issue in doc.get('issues') or [] if not issue.get('resolution'))
     limitation_summary = _confirmed_limitations_summary(summary.get('confirmed_limitations'))
     warnings, warning_summary = _progress_warning_projection(summary.get('warnings'), limitation_summary)
-    projected = {key: value for key, value in summary.items() if key not in ('warnings', 'confirmed_limitations')}
+    errors, error_summary = _progress_error_projection(summary.get('errors'))
+    projected = {key: value for key, value in summary.items() if key not in ('warnings', 'confirmed_limitations', 'errors')}
     return {**_projection_meta(doc, stage),
             'outline_length': sum(block['kind'] == 'heading' for block in doc['blocks']),
             'unresolved_issues': unresolved,
             **projected,
+            'errors': errors,
+            'error_summary': error_summary,
+            **pending_counts(doc),
             'warnings': warnings,
             'warning_summary': warning_summary,
             'confirmed_limitations_summary': limitation_summary}
 
 
-def project_document(doc, *, full=False, stage=None, view='show', limit=8, section_limit=None, section_offset=None):
+def project_document(doc, *, full=False, stage=None, view='show', limit=DEFAULT_TASK_LIMIT, section_limit=None, section_offset=None):
     if view == 'progress':
         return _progress_view(doc, full=full)
     if view == 'tasks':
@@ -671,6 +721,32 @@ def _structure_keep(doc, doc_id, payload):
 
 def _keep_extracted(payload):
     return bool(payload.get('keep_extracted')) or payload.get('mode') in ('keep', 'patch', 'keep_extracted')
+
+
+def assemble_payload(doc, operation, blocks, submission_id, agent):
+    # Wraps an Agent-authored block list. Does not invent translations or review notes.
+    if operation not in ('translate', 'review'):
+        raise ValueError('assemble operation must be translate or review')
+    if not isinstance(blocks, list) or not blocks:
+        raise ValueError('blocks must be a non-empty list')
+    if not isinstance(submission_id, str) or not submission_id.strip():
+        raise ValueError('submission_id is required')
+    if not isinstance(agent, str) or not agent.strip():
+        raise ValueError('agent is required')
+    by_id = {block['id']: block for block in doc['blocks']}
+    prepared = []
+    for item in blocks:
+        if not isinstance(item, dict) or not item.get('id'):
+            raise ValueError('each assembled block needs an id')
+        row = dict(item)
+        if operation == 'review' and not row.get('translation_hash'):
+            block = by_id.get(row['id'])
+            if not block or not block.get('translation'):
+                raise ValueError(f"{row['id']}: no current translation to hash")
+            row['translation_hash'] = digest(block['translation'])
+        prepared.append(row)
+    return {'revision': doc['revision'], 'submission_id': submission_id, 'agent': agent,
+            'operation': operation, 'blocks': prepared}
 
 
 def submit(doc_id, payload):
