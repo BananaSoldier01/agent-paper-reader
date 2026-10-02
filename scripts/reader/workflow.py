@@ -177,11 +177,15 @@ def _projection_meta(doc, stage):
             'source_file': doc.get('source_file'), 'schema_version': doc.get('schema_version')}
 
 
-def _window(doc, chosen):
+DEFAULT_SECTION_CONTEXT_LIMIT = 24
+
+
+def _window(doc, chosen, *, section_limit=None, section_offset=None):
     indices = [doc['blocks'].index(b) for b in chosen]
     context = doc['blocks'][max(0, min(indices)-1):max(indices)+2] if indices else []
-    # Include complete enclosing section, even when batch is smaller.
+    # Include enclosing section, then optionally window it for default projections.
     section = []
+    start = end = 0
     if indices:
         start = min(indices)
         while start > 0 and doc['blocks'][start]['kind'] != 'heading':
@@ -190,31 +194,58 @@ def _window(doc, chosen):
         while end < len(doc['blocks']) and doc['blocks'][end]['kind'] != 'heading':
             end += 1
         section = doc['blocks'][start:end]
-    return context, section
+    total = len(section)
+    limit = None if section_limit is None else max(1, int(section_limit))
+    if limit is None or total <= limit:
+        offset = 0
+        returned = section
+        truncated = False
+    else:
+        if section_offset is None:
+            first = (min(indices) - start) if indices else 0
+            offset = max(0, min(first, total - limit))
+        else:
+            offset = max(0, min(int(section_offset), max(0, total - limit)))
+        returned = section[offset:offset + limit]
+        truncated = True
+    window = {
+        'section_start': start,
+        'section_end': end,
+        'section_total': total,
+        'section_offset': offset,
+        'section_limit': limit if limit is not None else total,
+        'returned_start': start + offset,
+        'returned_end': start + offset + len(returned),
+        'truncated': truncated,
+    }
+    return context, returned, window
 
 
-def _tasks_view(doc, limit=8, full=False, stage=None):
+def _tasks_view(doc, limit=8, full=False, stage=None, section_limit=None, section_offset=None):
     computed, pending = _stage_and_pending(doc)
     stage = computed if full else (stage or computed)
     chosen = (doc['blocks'] if stage == 'structure' else pending)[:limit]
-    context, section = _window(doc, chosen)
     if full:
+        context, section, window = _window(doc, chosen, section_limit=None, section_offset=None)
         return {'document_id': doc['id'], 'revision': doc['revision'], 'stage': computed, 'terms': doc['terms'],
                 'outline': [{'id': b['id'], 'text': b['text']} for b in doc['blocks'] if b['kind'] == 'heading'],
-                'blocks': chosen, 'context': context, 'section_context': section, 'issues': doc['issues']}
+                'blocks': chosen, 'context': context, 'section_context': section, 'issues': doc['issues'],
+                'section_window': window}
+    cap = DEFAULT_SECTION_CONTEXT_LIMIT if section_limit is None else section_limit
+    context, section, window = _window(doc, chosen, section_limit=cap, section_offset=section_offset)
     meta = _projection_meta(doc, stage)
     if stage == 'structure':
         return {**meta, 'terms': doc['terms'], 'outline': _outline(doc), 'issue_summary': issue_summary(doc),
                 'blocks': [_block_summary(b) for b in chosen], 'context': [_block_summary(b) for b in context],
-                'section_context': [_block_summary(b) for b in section]}
+                'section_context': [_block_summary(b) for b in section], 'section_window': window}
     return {**meta, 'terms': doc['terms'], 'outline': _outline(doc),
             'issue_summary': issue_summary(doc, unresolved_only=True),
             'blocks': [_public_block(b) for b in chosen], 'context': [_public_block(b) for b in context],
-            'section_context': [_public_block(b) for b in section]}
+            'section_context': [_public_block(b) for b in section], 'section_window': window}
 
 
-def tasks(doc, limit=8, full=False):
-    return _tasks_view(doc, limit, full=full)
+def tasks(doc, limit=8, full=False, section_limit=None, section_offset=None):
+    return _tasks_view(doc, limit, full=full, section_limit=section_limit, section_offset=section_offset)
 
 
 def _show_full(doc):
@@ -225,7 +256,7 @@ def _show_full(doc):
     return result
 
 
-def _show_view(doc, full=False, stage=None, limit=8):
+def _show_view(doc, full=False, stage=None, limit=8, section_limit=None, section_offset=None):
     if full:
         return _show_full(doc)
     computed, _pending = _stage_and_pending(doc)
@@ -233,7 +264,7 @@ def _show_view(doc, full=False, stage=None, limit=8):
     if stage == 'structure':
         return {**_projection_meta(doc, stage), 'outline': _outline(doc), 'issue_summary': issue_summary(doc),
                 'blocks': [_block_summary(b) for b in doc['blocks']]}
-    return _tasks_view(doc, limit, full=False, stage=stage)
+    return _tasks_view(doc, limit, full=False, stage=stage, section_limit=section_limit, section_offset=section_offset)
 
 
 def _progress_view(doc, full=False):
@@ -248,13 +279,13 @@ def _progress_view(doc, full=False):
             'unresolved_issues': unresolved, **summary}
 
 
-def project_document(doc, *, full=False, stage=None, view='show', limit=8):
+def project_document(doc, *, full=False, stage=None, view='show', limit=8, section_limit=None, section_offset=None):
     if view == 'progress':
         return _progress_view(doc, full=full)
     if view == 'tasks':
-        return _tasks_view(doc, limit, full=full, stage=stage)
+        return _tasks_view(doc, limit, full=full, stage=stage, section_limit=section_limit, section_offset=section_offset)
     if view == 'show':
-        return _show_view(doc, full=full, stage=stage, limit=limit)
+        return _show_view(doc, full=full, stage=stage, limit=limit, section_limit=section_limit, section_offset=section_offset)
     raise ValueError('Unknown projection view')
 
 
@@ -310,6 +341,22 @@ def _structure_replace(doc, doc_id, payload):
     _commit_structure(doc, blocks, payload)
 
 
+def _merge_assets(doc_id, into, sources, merge):
+    # Refuse silent figure loss: multiple distinct assets need an explicit merged asset.
+    assets = []
+    for block in [into, *sources]:
+        asset = block.get('asset')
+        if asset and asset not in assets:
+            assets.append(asset)
+    if 'asset' in merge:
+        _assign_asset(doc_id, into, merge['asset'])
+        return
+    if len(assets) > 1:
+        raise ValueError('Merge would discard figure assets; provide explicit asset for the merged block')
+    if len(assets) == 1:
+        into['asset'] = assets[0]
+
+
 def _structure_keep(doc, doc_id, payload):
     # Start from the extracted ledger. Explicit update/merge notes beat default_structure_note.
     blocks = [dict(block, source_ids=list(block['source_ids'])) for block in doc['blocks']]
@@ -326,14 +373,20 @@ def _structure_keep(doc, doc_id, payload):
             if item['kind'] not in KINDS:
                 raise ValueError('Unknown content kind')
             block['kind'] = item['kind']
+        touched_source = False
         if 'text' in item:
             block['text'] = item['text']
+            touched_source = True
         if 'source_ids' in item:
             block['source_ids'] = list(item['source_ids'])
+            touched_source = True
         if 'structure_note' in item:
             block['structure_note'] = item['structure_note']
         if 'source_change' in item:
             block['source_change'] = item['source_change']
+        elif touched_source:
+            # Incremental text/source edits need a fresh reason; do not reuse a stale one.
+            block['source_change'] = ''
         if 'asset' in item:
             _assign_asset(doc_id, block, item['asset'])
     for merge in merges:
@@ -347,11 +400,14 @@ def _structure_keep(doc, doc_id, payload):
         if not isinstance(from_ids, list) or not from_ids or len(from_ids) != len(set(from_ids)) or into['id'] in from_ids:
             raise ValueError('Merge from must list other blocks once')
         gained = []
+        sources = []
         for fid in from_ids:
             src = by_id.get(fid)
             if not src:
                 raise ValueError(f"Unknown block {fid}")
+            sources.append(src)
             gained.extend(src['source_ids'])
+        _merge_assets(doc_id, into, sources, merge)
         into['source_ids'] = list(into['source_ids']) + gained
         if 'text' in merge:
             into['text'] = merge['text']
@@ -361,6 +417,9 @@ def _structure_keep(doc, doc_id, payload):
             into['kind'] = merge['kind']
         if 'source_change' in merge:
             into['source_change'] = merge['source_change']
+        else:
+            # Merges always change source_ids; stale reasons must not cover the new partition.
+            into['source_change'] = ''
         into['structure_note'] = note
         drop = set(from_ids)
         blocks = [block for block in blocks if block['id'] not in drop]

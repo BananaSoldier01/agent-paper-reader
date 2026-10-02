@@ -16,6 +16,9 @@ def main():
         p=commands.add_parser(name); p.add_argument('document_id')
         if name=='tasks': p.add_argument('--limit',type=int,default=8)
         if name in ('show','tasks','progress'): p.add_argument('--full',action='store_true')
+        if name in ('show','tasks'):
+            p.add_argument('--section-limit',type=int,default=None)
+            p.add_argument('--section-offset',type=int,default=None)
         if name=='submit': p.add_argument('payload')
         if name=='export': p.add_argument('--output')
     p=commands.add_parser('crop'); p.add_argument('document_id'); p.add_argument('--page',type=int,required=True); p.add_argument('--bbox',nargs=4,type=float,required=True)
@@ -40,9 +43,11 @@ def main():
         else:
             d=read(args.document_id)
             if args.command=='show':
-                result=project_document(d, full=args.full, view='show')
+                result=project_document(d, full=args.full, view='show',
+                                       section_limit=args.section_limit, section_offset=args.section_offset)
             elif args.command=='tasks':
-                result=project_document(d, full=args.full, view='tasks', limit=max(1,args.limit))
+                result=project_document(d, full=args.full, view='tasks', limit=max(1,args.limit),
+                                       section_limit=args.section_limit, section_offset=args.section_offset)
             elif args.command=='progress':
                 result=project_document(d, full=args.full, view='progress')
             else: result={'document_id':d['id'],'revision':d['revision'],'stage':d['stage'],'fingerprint':fingerprint(d),**validate(d)}

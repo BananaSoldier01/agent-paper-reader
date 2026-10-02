@@ -45,8 +45,8 @@ python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>"
 开始或恢复处理前读 [处理流程](references/workflow.md)；首次构造提交、处理版本冲突或对齐偏移时查 [数据格式](references/data-format.md)。详细规则以这些包内资料为准，不依赖上级仓库文档。
 
 1. `import "/absolute/path/paper.pdf"`，记录返回的 `document_id`。同一文献再次导入会返回已有记录，先检查状态再继续。
-2. 用默认投影核对结构，再提交。`show`、`progress`、`tasks` 默认不返回整份 `document.json`；结构阶段的 `show` 只给大纲、问题计数和块摘要。不要为了浏览结构去读全量 JSON。需要 atoms、全文字符或全部译文哈希时才加 `--full`。阅读顺序、标题层级、段落、图表和公式仍要对照原页确认。结构可以一次提交完整 `blocks`，也可以 `keep_extracted`：在提取结果上交 `updates` / `merges`，并用 `default_structure_note` 给未改动的块写同一条理由。翻译或批注产生后结构冻结，不能把结构检查留到最后。
-3. 根据全文语境统一术语，按章节上下文翻译和对齐。`tasks` 在翻译和复核阶段给出本节、术语和相邻上下文。程序可以计算偏移，但语义对应关系必须由 Agent 判断，不能按句号或序号机械配对。
+2. 用默认投影核对结构，再提交。`show`、`progress`、`tasks` 默认不返回整份 `document.json`；结构阶段的 `show` 只给大纲、问题计数和块摘要。不要为了浏览结构去读全量 JSON。需要 atoms、全文字符或全部译文哈希时才加 `--full`。阅读顺序、标题层级、段落、图表和公式仍要对照原页确认。结构可以一次提交完整 `blocks`，也可以 `keep_extracted`：在提取结果上交 `updates` / `merges`，并用 `default_structure_note` 给未改动的块写同一条理由。改文字或来源须带本次 `source_change`；多图合并须显式 `asset`，禁止静默丢图。翻译或批注产生后结构冻结，不能把结构检查留到最后。
+3. 根据全文语境统一术语，按章节上下文翻译和对齐。`tasks` 在翻译和复核阶段给出本节、术语和相邻上下文；默认 `section_context` 有长度上限，可用 `--section-offset` / `--section-limit` 分段读取。程序可以计算偏移，但语义对应关系必须由 Agent 判断，不能按句号或序号机械配对。
 4. 独立于初译，再对照原文检查全部译文、术语和对应关系，提交块级与全文复核。保留数字、单位、公式、引用、否定和限定；作者疑点另行说明，不擅自改写原结论。
 5. `validate ID` 通过后执行 `export ID`。导出入口会拒绝未完成复核的文献；检查失败时修正问题，不能绕过校验制造完成状态。
 

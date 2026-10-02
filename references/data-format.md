@@ -27,7 +27,7 @@
 
 结构阶段的 `show` 另含 `outline`（heading 的 id + 至多约 160 码点文本）、`issue_summary` 和全部块的摘要。块摘要只有 `id`、`kind`、截断后的 `text`、`has_structure_note`、`source_count`，没有 translation、history 或 atoms。`issue_summary` 按 issue id 前缀（去掉末尾的 `-数字` 或 `-a/-b` 加数字；若 issue 自带 `type` 则用 type）统计 `unresolved` / `resolved`，并给每类最多 3 个样例 id，不含问题正文。结构阶段的 `tasks` 使用同一摘要，但 `blocks` / `context` / `section_context` 仍受 `--limit` 限制，并保留 `terms`。
 
-翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。这些块可以含翻译所需的完整字段，并带计算出来的 `translation_hash`；不附带整份 atoms。`issue_summary` 只统计未解决项。要核对全篇译文哈希时用 `show --full`。
+翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。这些块可以含翻译所需的完整字段，并带计算出来的 `translation_hash`；不附带整份 atoms。`issue_summary` 只统计未解决项。默认投影的 `section_context` 有长度上限（默认 24 块），并附带 `section_window`（`section_total` / `section_offset` / `section_limit` / `truncated` 等）便于分段读取；CLI 可用 `--section-limit` / `--section-offset` 翻页。要整节或全篇时用 `--full`，或加大 `--section-limit`。要核对全篇译文哈希时用 `show --full`。
 
 `progress` 默认投影是 validate 摘要加上 `outline_length`、`unresolved_issues` 和上述公共字段，不返回块正文或 atoms。validate 原有的 `blocks` 仍是块数量，不是块列表。
 
@@ -41,7 +41,7 @@
 ```json
 {"revision":0,"submission_id":"structure-1","agent":"current agent","operation":"structure","note":"核对原文页面与跨页次序","blocks":[{"id":"b00001","kind":"paragraph","text":"A. B.","source_ids":["a00001"],"structure_note":"源行顺序核对无误"}]}
 ```
-增量（不要带 `blocks`）：`keep_extracted: true`，或 `mode` 为 `keep` / `patch`。以当前提取块为起点。`updates` 按 id 修改可选字段 kind、text、source_ids、structure_note、asset、source_change。`merges` 把 `from` 各块的 source_ids 按顺序并入 `into`，删除 `from` 块，并且必须给 structure_note；可选 text、kind、source_change。`default_structure_note` 只填仍为空的说明，显式 updates/merges 的说明优先。提取已经正确时，可以只交这一条默认说明。最终每块仍要有非空 structure_note，atoms 仍须精确分区一次；改变源文字仍要 `source_change`。已有翻译或笔记后结构冻结。
+增量（不要带 `blocks`）：`keep_extracted: true`，或 `mode` 为 `keep` / `patch`。以当前提取块为起点。`updates` 按 id 修改可选字段 kind、text、source_ids、structure_note、asset、source_change。每次改 `text` 或 `source_ids` 且结果与 atoms 不一致时，必须在**本次** update 里提供对应的 `source_change`，不能沿用旧理由。`merges` 把 `from` 各块的 source_ids 按顺序并入 `into`，删除 `from` 块，并且必须给 structure_note；可选 text、kind、source_change、asset。若参与合并的块带有多张不同图片，必须显式给出合并后的 `asset`，禁止静默丢图；仅一张图时会保留该资源。`default_structure_note` 只填仍为空的说明，显式 updates/merges 的说明优先。提取已经正确时，可以只交这一条默认说明。最终每块仍要有非空 structure_note，atoms 仍须精确分区一次；改变源文字仍要 `source_change`。已有翻译或笔记后结构冻结。
 ```json
 {"revision":0,"submission_id":"structure-keep-1","agent":"current agent","operation":"structure","note":"提取已核对","keep_extracted":true,"default_structure_note":"提取块与原文一致，予以保留","updates":[{"id":"b00002","kind":"heading","structure_note":"此行是标题"}],"merges":[{"into":"b00003","from":["b00004"],"text":"合并后的原文","structure_note":"跨页断行合并"}]}
 ```
