@@ -47,6 +47,9 @@ def differences(block):
     return [key for key, pattern in patterns.items() if Counter(re.findall(pattern,en)) != Counter(re.findall(pattern,zh))]
 
 
+_CONFIRMED_LIMITATION_WARNING = 'Confirmed known limitation (not actually fixed): '
+
+
 def validate(doc):
     errors, warnings = [], []
     atoms = {a['id'] for a in doc['atoms']}
@@ -65,8 +68,7 @@ def validate(doc):
     limitations = confirmed_limitations(doc)
     for item in limitations:
         warnings.append(
-            'Confirmed known limitation (not actually fixed): '
-            f"{item['id']} [{item['category']}] {_short_resolution(item['resolution'])}"
+            f"{_CONFIRMED_LIMITATION_WARNING}{item['id']} [{item['category']}] {_short_resolution(item['resolution'])}"
         )
     translated_texts = Counter(b['translation']['text'].strip() for b in doc['blocks'] if b.get('translation'))
     for b in doc['blocks']:
@@ -430,6 +432,47 @@ def _show_view(doc, full=False, stage=None, limit=8, section_limit=None, section
     return _tasks_view(doc, limit, full=False, stage=stage, section_limit=section_limit, section_offset=section_offset)
 
 
+def _confirmed_limitations_summary(limitations, samples=3):
+    by_category = {}
+    for item in limitations or []:
+        category = item.get('category') or 'issue'
+        bucket = by_category.get(category)
+        if bucket is None:
+            bucket = {
+                'count': 0,
+                'sample_ids': [],
+                'summary': _short_resolution(item.get('resolution') or ''),
+            }
+            by_category[category] = bucket
+        bucket['count'] += 1
+        item_id = item.get('id')
+        if item_id and len(bucket['sample_ids']) < samples and item_id not in bucket['sample_ids']:
+            bucket['sample_ids'].append(item_id)
+    return {'total': len(limitations or []), 'by_category': by_category}
+
+
+def _progress_warning_projection(warnings, summary):
+    # Per-item limitation warnings repeat one resolution hundreds of times; keep other warnings intact.
+    prefix = _CONFIRMED_LIMITATION_WARNING
+    other = [item for item in warnings or [] if not str(item).startswith(prefix)]
+    notes = []
+    for category, bucket in summary['by_category'].items():
+        bits = [f"{category} x{bucket['count']}"]
+        if bucket['sample_ids']:
+            bits.append('samples: ' + ', '.join(str(item_id) for item_id in bucket['sample_ids']))
+        if bucket['summary']:
+            bits.append(bucket['summary'])
+        notes.append(prefix + '; '.join(bits))
+    collapsed = len(warnings or []) - len(other)
+    warning_summary = {
+        'total': len(warnings or []),
+        'confirmed_limitations': collapsed,
+        'other': len(other),
+        'by_category': {category: bucket['count'] for category, bucket in summary['by_category'].items()},
+    }
+    return other + notes, warning_summary
+
+
 def _progress_view(doc, full=False):
     summary = validate(doc)
     if full:
@@ -437,9 +480,16 @@ def _progress_view(doc, full=False):
                 'fingerprint': fingerprint(doc), **summary}
     stage, _pending = _stage_and_pending(doc)
     unresolved = sum(1 for issue in doc.get('issues') or [] if not issue.get('resolution'))
+    limitation_summary = _confirmed_limitations_summary(summary.get('confirmed_limitations'))
+    warnings, warning_summary = _progress_warning_projection(summary.get('warnings'), limitation_summary)
+    projected = {key: value for key, value in summary.items() if key not in ('warnings', 'confirmed_limitations')}
     return {**_projection_meta(doc, stage),
             'outline_length': sum(block['kind'] == 'heading' for block in doc['blocks']),
-            'unresolved_issues': unresolved, **summary}
+            'unresolved_issues': unresolved,
+            **projected,
+            'warnings': warnings,
+            'warning_summary': warning_summary,
+            'confirmed_limitations_summary': limitation_summary}
 
 
 def project_document(doc, *, full=False, stage=None, view='show', limit=8, section_limit=None, section_offset=None):

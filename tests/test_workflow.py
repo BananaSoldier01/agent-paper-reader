@@ -6,7 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 from reader import store
 from reader.importer import import_document
-from reader.workflow import submit, user_edit, tasks, validate, fingerprint, note_status, project_document
+from reader.workflow import (
+    submit, user_edit, tasks, validate, fingerprint, note_status, project_document, _short_resolution,
+)
 from reader.store import digest, Conflict
 from reader.server import app, TOKEN
 
@@ -701,3 +703,94 @@ def test_public_document_and_export_keep_limitation_warnings(doc, tmp_path, monk
     assert 'Confirmed known limitation' in html
     assert 'image-b00001' in html
     assert 'tex-includegraphics-1' in html
+
+
+def test_default_progress_summarizes_large_limitation_batches(doc):
+    tex_resolution = (
+        'TEX_RESOLUTION_BLOB Single-file TeX does not compile; includegraphics assets stay unembedded as a product limit. '
+        * 3
+    ).strip()
+    tex_evidence = (
+        'TEX_EVIDENCE_BLOB checked source file sample tex-includegraphics-1; ' + ('not embedded no compile. ' * 16)
+    ).strip()
+    image_resolution = 'Markdown missing image is not fetched; local archive product limit.'
+    image_evidence = 'IMAGE_EVIDENCE_BLOB checked sample image-b00001; source file has a missing local image.'
+    issues = [{'id': f'tex-includegraphics-{i}', 'message': 'fig', 'resolution': None} for i in range(1, 301)]
+    issues.extend([
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+        {'id': 'image-b00002', 'message': 'missing', 'resolution': None},
+        {'id': 'page-1', 'message': 'scan body stays unresolved', 'resolution': None},
+    ])
+    seeded = _patch_issues(doc, issues)
+    saved = send(seeded, 'resolve', limitations=[
+        {'category': 'tex-includegraphics', 'resolution': tex_resolution, 'evidence': tex_evidence},
+        {'category': 'image', 'resolution': image_resolution, 'evidence': image_evidence},
+    ])
+
+    def plant_orphan(current):
+        current['notes'].append({
+            'id': 'n-orphan', 'block_id': 'missing-block', 'side': 'source',
+            'start': 0, 'end': 1, 'quote': 'Z', 'text': 'reattach me', 'difficult': False,
+        })
+
+    saved = store.mutate(saved['id'], saved['revision'], plant_orphan)
+    checked = validate(saved)
+    view = project_document(saved, view='progress')
+    full = project_document(saved, view='progress', full=True)
+    view_json = json.dumps(view, ensure_ascii=False)
+    full_json = json.dumps(full, ensure_ascii=False)
+
+    assert view['projection'] is True
+    assert view['outline_length'] >= 1 and view['unresolved_issues'] == 1
+    assert 'confirmed_limitations' not in view
+    assert 'resolution_evidence' not in view_json
+    assert view_json.count(tex_evidence) == 0 and view_json.count(image_evidence) == 0
+    assert view_json.count(tex_resolution) == 0
+    assert 'tex-includegraphics-300' not in view_json and 'tex-includegraphics-4' not in view_json
+    assert len(view_json.encode('utf-8')) < 10_000
+    assert len(view_json.encode('utf-8')) * 20 < len(full_json.encode('utf-8'))
+    assert view['ok'] == checked['ok'] and view['errors'] == checked['errors']
+    assert view['blocks'] == checked['blocks'] and view['translated'] == checked['translated']
+    assert view['reviewed'] == checked['reviewed']
+    summary = view['confirmed_limitations_summary']
+    assert summary['total'] == 302
+    assert summary['by_category']['tex-includegraphics'] == {
+        'count': 300,
+        'sample_ids': ['tex-includegraphics-1', 'tex-includegraphics-2', 'tex-includegraphics-3'],
+        'summary': _short_resolution(tex_resolution),
+    }
+    assert summary['by_category']['image'] == {
+        'count': 2,
+        'sample_ids': ['image-b00001', 'image-b00002'],
+        'summary': image_resolution,
+    }
+    assert tex_evidence not in summary['by_category']['tex-includegraphics']['summary']
+    limitation_lines = [item for item in view['warnings'] if item.startswith('Confirmed known limitation')]
+    assert len(limitation_lines) == 2
+    assert any('tex-includegraphics x300' in item and 'tex-includegraphics-1' in item for item in limitation_lines)
+    assert any('image x2' in item and 'image-b00002' in item for item in limitation_lines)
+    assert any(item == 'Note n-orphan needs reattachment' for item in view['warnings'])
+    assert view['warning_summary'] == {
+        'total': 303,
+        'confirmed_limitations': 302,
+        'other': 1,
+        'by_category': {'tex-includegraphics': 300, 'image': 2},
+    }
+
+    assert 'projection' not in full and 'outline_length' not in full
+    assert 'confirmed_limitations_summary' not in full and 'warning_summary' not in full
+    assert full['confirmed_limitations'] == checked['confirmed_limitations']
+    assert full['warnings'] == checked['warnings'] and full['errors'] == checked['errors']
+    assert len(full['confirmed_limitations']) == 302
+    assert len(full['warnings']) == 303
+    tex_rows = [item for item in full['confirmed_limitations'] if item['category'] == 'tex-includegraphics']
+    assert len(tex_rows) == 300
+    assert all(item['resolution'] == tex_resolution and item['resolution_evidence'] == tex_evidence for item in tex_rows)
+    assert {item['id'] for item in tex_rows} == {f'tex-includegraphics-{i}' for i in range(1, 301)}
+    image_rows = {item['id']: item for item in full['confirmed_limitations'] if item['category'] == 'image'}
+    assert set(image_rows) == {'image-b00001', 'image-b00002'}
+    assert image_rows['image-b00001']['resolution'] == image_resolution
+    assert image_rows['image-b00001']['resolution_evidence'] == image_evidence
+    assert full_json.count(tex_evidence) == 300
+    assert any('tex-includegraphics-300 [tex-includegraphics]' in item for item in full['warnings'])
+    assert any(item == 'Note n-orphan needs reattachment' for item in full['warnings'])
