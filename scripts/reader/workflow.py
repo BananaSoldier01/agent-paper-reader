@@ -1,3 +1,4 @@
+import copy
 import re
 from collections import Counter
 from .store import mutate, digest, folder
@@ -101,7 +102,7 @@ def note_status(doc,note):
     return 'attached' if value[note['start']:note['end']] == note['quote'] else 'orphaned'
 
 
-def tasks(doc, limit=8):
+def _stage_and_pending(doc):
     stage = 'structure' if not doc['structure_review'] else 'terms' if not doc.get('terms_review') and not doc['terms'] else 'translate'
     pending = [b for b in doc['blocks'] if b['kind'] not in VERBATIM and not b['translation']]
     if stage not in ('structure','terms') and not pending:
@@ -109,22 +110,283 @@ def tasks(doc, limit=8):
         pending = [b for b in doc['blocks'] if b['kind'] not in VERBATIM and (not b['review'] or b['review']['translation_hash']!=digest(b['translation']))]
         if not pending:
             stage = 'full_review' if not validate(doc)['ok'] else 'complete'
-    chosen = (doc['blocks'] if stage=='structure' else pending)[:limit]
+    return stage, pending
+
+
+def _issue_prefix(issue):
+    kind = issue.get('type')
+    if isinstance(kind, str) and kind.strip():
+        return kind.strip()
+    iid = str(issue.get('id') or 'issue')
+    return re.sub(r'-(?:\d+|[ab]\d+)$', '', iid) or iid
+
+
+def issue_summary(doc, unresolved_only=False, samples=3):
+    grouped = {}
+    for issue in doc.get('issues') or []:
+        resolved = bool(issue.get('resolution'))
+        if unresolved_only and resolved:
+            continue
+        bucket = grouped.setdefault(_issue_prefix(issue), {'unresolved': 0, 'resolved': 0, 'sample_ids': []})
+        if resolved:
+            bucket['resolved'] += 1
+        else:
+            bucket['unresolved'] += 1
+            if len(bucket['sample_ids']) < samples:
+                bucket['sample_ids'].append(issue['id'])
+    if not unresolved_only:
+        for issue in doc.get('issues') or []:
+            if not issue.get('resolution'):
+                continue
+            bucket = grouped[_issue_prefix(issue)]
+            if len(bucket['sample_ids']) < samples and issue['id'] not in bucket['sample_ids']:
+                bucket['sample_ids'].append(issue['id'])
+    unresolved = sum(bucket['unresolved'] for bucket in grouped.values())
+    if unresolved_only:
+        by_type = {key: {'unresolved': bucket['unresolved'], 'sample_ids': bucket['sample_ids']} for key, bucket in grouped.items()}
+        return {'unresolved': unresolved, 'by_type': by_type}
+    return {'unresolved': unresolved, 'resolved': sum(bucket['resolved'] for bucket in grouped.values()), 'by_type': grouped}
+
+
+def _block_summary(block, width=160):
+    text = block.get('text') or ''
+    return {'id': block['id'], 'kind': block['kind'], 'text': text[:width],
+            'has_structure_note': bool(str(block.get('structure_note') or '').strip()),
+            'source_count': len(block.get('source_ids') or [])}
+
+
+def _public_block(block):
+    shown = dict(block)
+    shown['translation_hash'] = digest(block['translation']) if block.get('translation') else None
+    return shown
+
+
+def _outline(doc, width=160):
+    rows = []
+    for block in doc['blocks']:
+        if block['kind'] == 'heading':
+            text = block.get('text') or ''
+            rows.append({'id': block['id'], 'text': text if width is None else text[:width]})
+    return rows
+
+
+def _projection_meta(doc, stage):
+    return {'document_id': doc['id'], 'id': doc['id'], 'revision': doc['revision'], 'stage': stage,
+            'title': doc.get('title'), 'fingerprint': fingerprint(doc), 'projection': True,
+            'block_count': len(doc['blocks']), 'atom_count': len(doc['atoms']),
+            'source_file': doc.get('source_file'), 'schema_version': doc.get('schema_version')}
+
+
+def _window(doc, chosen):
     indices = [doc['blocks'].index(b) for b in chosen]
-    context = doc['blocks'][max(0,min(indices)-1):max(indices)+2] if indices else []
+    context = doc['blocks'][max(0, min(indices)-1):max(indices)+2] if indices else []
     # Include complete enclosing section, even when batch is smaller.
     section = []
     if indices:
         start = min(indices)
-        while start > 0 and doc['blocks'][start]['kind']!='heading':
+        while start > 0 and doc['blocks'][start]['kind'] != 'heading':
             start -= 1
         end = max(indices)+1
-        while end < len(doc['blocks']) and doc['blocks'][end]['kind']!='heading':
+        while end < len(doc['blocks']) and doc['blocks'][end]['kind'] != 'heading':
             end += 1
         section = doc['blocks'][start:end]
-    return {'document_id':doc['id'],'revision':doc['revision'],'stage':stage,'terms':doc['terms'],
-            'outline':[{'id':b['id'],'text':b['text']} for b in doc['blocks'] if b['kind']=='heading'],
-            'blocks':chosen,'context':context,'section_context':section,'issues':doc['issues']}
+    return context, section
+
+
+def _tasks_view(doc, limit=8, full=False, stage=None):
+    computed, pending = _stage_and_pending(doc)
+    stage = computed if full else (stage or computed)
+    chosen = (doc['blocks'] if stage == 'structure' else pending)[:limit]
+    context, section = _window(doc, chosen)
+    if full:
+        return {'document_id': doc['id'], 'revision': doc['revision'], 'stage': computed, 'terms': doc['terms'],
+                'outline': [{'id': b['id'], 'text': b['text']} for b in doc['blocks'] if b['kind'] == 'heading'],
+                'blocks': chosen, 'context': context, 'section_context': section, 'issues': doc['issues']}
+    meta = _projection_meta(doc, stage)
+    if stage == 'structure':
+        return {**meta, 'terms': doc['terms'], 'outline': _outline(doc), 'issue_summary': issue_summary(doc),
+                'blocks': [_block_summary(b) for b in chosen], 'context': [_block_summary(b) for b in context],
+                'section_context': [_block_summary(b) for b in section]}
+    return {**meta, 'terms': doc['terms'], 'outline': _outline(doc),
+            'issue_summary': issue_summary(doc, unresolved_only=True),
+            'blocks': [_public_block(b) for b in chosen], 'context': [_public_block(b) for b in context],
+            'section_context': [_public_block(b) for b in section]}
+
+
+def tasks(doc, limit=8, full=False):
+    return _tasks_view(doc, limit, full=full)
+
+
+def _show_full(doc):
+    result = copy.deepcopy(doc)
+    result['fingerprint'] = fingerprint(doc)
+    for block in result['blocks']:
+        block['translation_hash'] = digest(block['translation']) if block['translation'] else None
+    return result
+
+
+def _show_view(doc, full=False, stage=None, limit=8):
+    if full:
+        return _show_full(doc)
+    computed, _pending = _stage_and_pending(doc)
+    stage = stage or computed
+    if stage == 'structure':
+        return {**_projection_meta(doc, stage), 'outline': _outline(doc), 'issue_summary': issue_summary(doc),
+                'blocks': [_block_summary(b) for b in doc['blocks']]}
+    return _tasks_view(doc, limit, full=False, stage=stage)
+
+
+def _progress_view(doc, full=False):
+    summary = validate(doc)
+    if full:
+        return {'document_id': doc['id'], 'revision': doc['revision'], 'stage': doc['stage'],
+                'fingerprint': fingerprint(doc), **summary}
+    stage, _pending = _stage_and_pending(doc)
+    unresolved = sum(1 for issue in doc.get('issues') or [] if not issue.get('resolution'))
+    return {**_projection_meta(doc, stage),
+            'outline_length': sum(block['kind'] == 'heading' for block in doc['blocks']),
+            'unresolved_issues': unresolved, **summary}
+
+
+def project_document(doc, *, full=False, stage=None, view='show', limit=8):
+    if view == 'progress':
+        return _progress_view(doc, full=full)
+    if view == 'tasks':
+        return _tasks_view(doc, limit, full=full, stage=stage)
+    if view == 'show':
+        return _show_view(doc, full=full, stage=stage, limit=limit)
+    raise ValueError('Unknown projection view')
+
+
+def _canonical(value):
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFKC', value).casefold() if c.isalnum())
+
+
+def _assign_asset(doc_id, block, asset):
+    if asset and (not isinstance(asset, str) or '/' in asset or '\\' in asset or not (folder(doc_id) / asset).is_file()):
+        raise ValueError('Unknown local asset')
+    block['asset'] = asset
+
+
+def _source_text(doc, source_ids):
+    return ' '.join(atom['text'] for sid in source_ids for atom in doc['atoms'] if atom['id'] == sid)
+
+
+def _require_source_change(doc, block):
+    if block['kind'] in VERBATIM:
+        return
+    if _canonical(_source_text(doc, block['source_ids'])) != _canonical(block.get('text') or '') and not str(block.get('source_change') or '').strip():
+        raise ValueError('Changed source text requires explicit source_change explanation')
+
+
+def _commit_structure(doc, blocks, payload):
+    sources = [sid for block in blocks for sid in block['source_ids']]
+    if set(sources) != {atom['id'] for atom in doc['atoms']} or len(sources) != len(set(sources)):
+        raise ValueError('Structure must account for every source atom exactly once (including excluded items)')
+    if len({block['id'] for block in blocks}) != len(blocks):
+        raise ValueError('Duplicate block ids')
+    doc['blocks'] = blocks
+    doc['structure_review'] = {'agent': payload['agent'], 'note': payload['note']}
+
+
+def _structure_replace(doc, doc_id, payload):
+    old = {b['id']: b for b in doc['blocks']}
+    blocks = []
+    for item in payload['blocks']:
+        if item['kind'] not in KINDS:
+            raise ValueError('Unknown content kind')
+        block = dict(old.get(item['id'], {'translation': None, 'history': [], 'review': None, 'user_edited': False, 'asset': None}))
+        block.update({k: item[k] for k in ('id', 'kind', 'text', 'source_ids', 'structure_note')})
+        if 'asset' in item:
+            _assign_asset(doc_id, block, item['asset'])
+        if not block['source_ids'] or not block['structure_note'].strip():
+            raise ValueError('Each structural decision requires source ids and a reason')
+        if block['kind'] not in VERBATIM:
+            if _canonical(_source_text(doc, block['source_ids'])) != _canonical(block['text']) and not item.get('source_change', '').strip():
+                raise ValueError('Changed source text requires explicit source_change explanation')
+            block['source_change'] = item.get('source_change', '')
+        blocks.append(block)
+    _commit_structure(doc, blocks, payload)
+
+
+def _structure_keep(doc, doc_id, payload):
+    # Start from the extracted ledger. Explicit update/merge notes beat default_structure_note.
+    blocks = [dict(block, source_ids=list(block['source_ids'])) for block in doc['blocks']]
+    by_id = {block['id']: block for block in blocks}
+    updates = payload.get('updates') or []
+    merges = payload.get('merges') or []
+    if not isinstance(updates, list) or not isinstance(merges, list):
+        raise ValueError('updates and merges must be lists')
+    for item in updates:
+        block = by_id.get(item.get('id'))
+        if not block:
+            raise ValueError(f"Unknown block {item.get('id')}")
+        if 'kind' in item:
+            if item['kind'] not in KINDS:
+                raise ValueError('Unknown content kind')
+            block['kind'] = item['kind']
+        if 'text' in item:
+            block['text'] = item['text']
+        if 'source_ids' in item:
+            block['source_ids'] = list(item['source_ids'])
+        if 'structure_note' in item:
+            block['structure_note'] = item['structure_note']
+        if 'source_change' in item:
+            block['source_change'] = item['source_change']
+        if 'asset' in item:
+            _assign_asset(doc_id, block, item['asset'])
+    for merge in merges:
+        into = by_id.get(merge.get('into'))
+        if not into:
+            raise ValueError(f"Unknown block {merge.get('into')}")
+        note = merge.get('structure_note')
+        if not isinstance(note, str) or not note.strip():
+            raise ValueError('Merge requires structure_note')
+        from_ids = merge.get('from') or []
+        if not isinstance(from_ids, list) or not from_ids or len(from_ids) != len(set(from_ids)) or into['id'] in from_ids:
+            raise ValueError('Merge from must list other blocks once')
+        gained = []
+        for fid in from_ids:
+            src = by_id.get(fid)
+            if not src:
+                raise ValueError(f"Unknown block {fid}")
+            gained.extend(src['source_ids'])
+        into['source_ids'] = list(into['source_ids']) + gained
+        if 'text' in merge:
+            into['text'] = merge['text']
+        if 'kind' in merge:
+            if merge['kind'] not in KINDS:
+                raise ValueError('Unknown content kind')
+            into['kind'] = merge['kind']
+        if 'source_change' in merge:
+            into['source_change'] = merge['source_change']
+        into['structure_note'] = note
+        drop = set(from_ids)
+        blocks = [block for block in blocks if block['id'] not in drop]
+        by_id = {block['id']: block for block in blocks}
+    default_note = payload.get('default_structure_note')
+    if default_note is not None:
+        if not isinstance(default_note, str) or not default_note.strip():
+            raise ValueError('default_structure_note must be a non-empty string')
+        for block in blocks:
+            if not str(block.get('structure_note') or '').strip():
+                block['structure_note'] = default_note
+    for block in blocks:
+        if block.get('kind') not in KINDS:
+            raise ValueError('Unknown content kind')
+        if not block.get('source_ids') or not str(block.get('structure_note') or '').strip():
+            raise ValueError('Each structural decision requires source ids and a reason')
+    sources = [sid for block in blocks for sid in block['source_ids']]
+    if set(sources) != {atom['id'] for atom in doc['atoms']} or len(sources) != len(set(sources)):
+        raise ValueError('Structure must account for every source atom exactly once (including excluded items)')
+    for block in blocks:
+        _require_source_change(doc, block)
+    _commit_structure(doc, blocks, payload)
+
+
+def _keep_extracted(payload):
+    return bool(payload.get('keep_extracted')) or payload.get('mode') in ('keep', 'patch', 'keep_extracted')
 
 
 def submit(doc_id, payload):
@@ -133,35 +395,12 @@ def submit(doc_id, payload):
         if op == 'structure':
             if any(b['translation'] for b in doc['blocks']) or doc['notes']:
                 raise ValueError('Structure is frozen after translation/annotation; start structural correction before translation')
-            old = {b['id']:b for b in doc['blocks']}
-            blocks = []
-            for item in payload['blocks']:
-                if item['kind'] not in KINDS:
-                    raise ValueError('Unknown content kind')
-                b = dict(old.get(item['id'], {'translation':None,'history':[],'review':None,'user_edited':False,'asset':None}))
-                b.update({k:item[k] for k in ('id','kind','text','source_ids','structure_note')})
-                if 'asset' in item:
-                    asset = item['asset']
-                    if asset and (not isinstance(asset,str) or '/' in asset or '\\' in asset or not (folder(doc_id)/asset).is_file()):
-                        raise ValueError('Unknown local asset')
-                    b['asset'] = asset
-                if not b['source_ids'] or not b['structure_note'].strip():
-                    raise ValueError('Each structural decision requires source ids and a reason')
-                if b['kind'] not in VERBATIM:
-                    import unicodedata
-                    canonical=lambda v: ''.join(c for c in unicodedata.normalize('NFKC',v).casefold() if c.isalnum())
-                    source=' '.join(a['text'] for sid in b['source_ids'] for a in doc['atoms'] if a['id']==sid)
-                    if canonical(source)!=canonical(b['text']) and not item.get('source_change','').strip():
-                        raise ValueError('Changed source text requires explicit source_change explanation')
-                    b['source_change']=item.get('source_change','')
-                blocks.append(b)
-            sources = [a for b in blocks for a in b['source_ids']]
-            if set(sources)!={a['id'] for a in doc['atoms']} or len(sources)!=len(set(sources)):
-                raise ValueError('Structure must account for every source atom exactly once (including excluded items)')
-            if len({b['id'] for b in blocks})!=len(blocks):
-                raise ValueError('Duplicate block ids')
-            doc['blocks'] = blocks
-            doc['structure_review'] = {'agent':payload['agent'],'note':payload['note']}
+            if 'blocks' in payload:
+                _structure_replace(doc, doc_id, payload)
+            elif _keep_extracted(payload):
+                _structure_keep(doc, doc_id, payload)
+            else:
+                raise ValueError('Structure requires a complete blocks list or keep_extracted')
         elif op == 'terms':
             if not doc['structure_review']:
                 raise ValueError('Review structure first')
