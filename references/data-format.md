@@ -21,7 +21,7 @@
 
 - `show --full` 与旧版一致：整份 document、顶层 fingerprint、每个块的 `translation_hash`。
 - `tasks --full` 与旧版一致：限量全文块、整节上下文和全量 issues。
-- `progress --full` 与旧版一致：document_id、revision、stage、fingerprint 和 validate 摘要。
+- `progress --full` 与旧版一致：document_id、revision、stage、fingerprint 和完整 validate 摘要（含全部 `warnings` 与 `confirmed_limitations`）。不含默认投影的 `projection`、`outline_length`、`confirmed_limitations_summary` 或 `warning_summary`。
 
 默认投影的公共字段：`document_id`、`id`、`revision`、`stage`、`title`、`fingerprint`、`projection`、`block_count`、`atom_count`、`source_file`、`schema_version`。
 
@@ -29,7 +29,7 @@
 
 翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。这些块可以含翻译所需的完整字段，并带计算出来的 `translation_hash`；不附带整份 atoms。`issue_summary` 只统计未解决项。默认投影的 `section_context` 有长度上限（默认 24 块），并附带 `section_window`（`section_total` / `section_offset` / `section_limit` / `truncated` 等）便于分段读取；CLI 可用 `--section-limit` / `--section-offset` 翻页。要整节或全篇时用 `--full`，或加大 `--section-limit`。要核对全篇译文哈希时用 `show --full`。
 
-`progress` 默认投影是 validate 摘要加上 `outline_length`、`unresolved_issues` 和上述公共字段，不返回块正文或 atoms。validate 原有的 `blocks` 仍是块数量，不是块列表。
+`progress` 默认投影保留 validate 的 `ok`、`errors`、`blocks`（仍是块数量，不是块列表）、`translated`、`reviewed`，并加上 `outline_length`、`unresolved_issues`、`warning_summary`、`confirmed_limitations_summary` 和上述公共字段。不返回块正文或 atoms。`ok` 仍只由 errors 决定。已知限制不在默认投影里逐条展开。`confirmed_limitations_summary` 为 `total` 加 `by_category`：每类有 `count`、最多 3 个 `sample_ids`，以及一条共用短 `summary`（该类 resolution 压缩空白后最长约 120 字，不附 `resolution_evidence`）。`warnings` 只保留非限制类原文（例如失锚笔记）再加每类一条短注（类别、条数、样例 id、同一条短 summary）。`warning_summary` 为 `total`（压缩前的 warning 条数）、`confirmed_limitations`（被折叠的逐条限制 warning 数）、`other`（其余 warning 条数）和 `by_category`（各类条数）。完整的 `confirmed_limitations`（每项 `id`、`category`、`resolution`、`resolution_evidence`）和逐条 warning 仍由 `validate`、阅读界面、离线 HTML 和 `progress --full` 返回。
 
 ## 提交示例
 
@@ -58,7 +58,14 @@
 {"revision":3,"submission_id":"review-1","agent":"current agent","operation":"review","blocks":[{"id":"b00001","translation_hash":"show --full 或当前批次投影返回的哈希","note":"第二轮核对原文含义和条件","difference_explanation":"仅在存在具体差异时说明换算或原因"}]}
 ```
 全文复核：`operation: full_review`，附 `fingerprint`（取 progress）、`note`。
-来源问题：`operation: resolve`，附 `issues: [{"id":"page-3","resolution":"实际检查结果和处理方式"}]`；无法识读则保持未解决，不可仅写跳过。
+来源问题：`operation: resolve`，至少提供 `issues` 或 `limitations` 之一（可同时给）。逐条仍为 `issues: [{"id":"page-3","resolution":"实际检查结果和处理方式"}]`；空或空白 resolution 拒绝。无法识读的正文保持未解决，不可仅写跳过。
+
+按类已知限制用同一 operation 的 `limitations`（`operation: resolve_limitations` 是只使用 `limitations` 的别名）。每条含非空 `category`、`resolution`、`evidence`；后两项去空白后均不少于 24 字，不能只是 `ignore` / `skip` / `n/a` / `ok` / `done` / `resolved` / `limitation` / `已知限制` / `忽略` / `跳过` 等套话。`evidence` 还须含数字、issue id 样例，或具体核对词（`sample` / `checked` / `inspected` / `confirmed` / `source` / `file` / `missing` / `remote` / `not embedded` / `single-file` / `no compile` / `核对` / `确认` / `源` / `缺`）。按 issue id 前缀（去掉末尾的 `-数字` 或 `-a/-b` 加数字；若 issue 自带 `type` 则用 type）匹配**当前未解决**项，写入同一 `resolution`（并记录 `resolution_evidence` / `resolved_by=limitation_batch`）；已解决项和其他类不动。该类零匹配则失败。允许的 category 仅：`tex-includegraphics`、`tex-input`、`tex-env`、`tex-unclosed`、`image`、`docx-ole`、`docx-omath`、`docx-image`、`docx-crop`。`page`（扫描/低文本/编码）和 `docx-sym`（正文未知符号）禁止按类批处理，只能逐条 `issues` 或保持未解决。没有按文档清空全部 issues 的接口。
+```json
+{"revision":4,"submission_id":"resolve-lim-1","agent":"current agent","operation":"resolve","limitations":[{"category":"tex-includegraphics","resolution":"单文件 TeX 不编译，\\includegraphics 未嵌入，属产品已知边界。","evidence":"核对 sample tex-includegraphics-1、tex-includegraphics-2，源文件无编译步骤。"}]}
+```
+
+按类写入后，这些 issue 不再算未解决，不单独阻止 `validate` 通过或导出。它们仍是已确认的已知限制，不是已经修复：`validate` 为每条 `resolved_by=limitation_batch` 且 resolution 非空的 issue 增加 warning，并在 `confirmed_limitations` 列出 id、category、resolution、resolution_evidence。阅读界面和离线 HTML 会显示这些残留限制。空 resolution 仍然是 error。逐条 `issues` 更新 resolution 时会删除该 issue 上的 `resolution_evidence` 和 `resolved_by`。同一次提交里若先 `limitations` 再按 id 覆盖，被覆盖的 id 以逐条为准，不保留批处理字段。默认 `progress` 不重复这份完整列表，只给 `confirmed_limitations_summary` 和压缩后的 `warnings` / `warning_summary`；要逐条内容用 `validate` 或 `progress --full`。
 
 用户 HTTP 编辑使用 `POST /api/documents/ID/edit`，携带会话令牌 `X-Reader-Token` 和 revision。operation 为 `note/delete_note/translation/term/reading`。令牌由同源 `/api/session` 返回，只保存在运行内存；无 CORS、默认仅回环地址，非本地主机名拒绝。此服务不是多用户权限系统，不应暴露公网。
 

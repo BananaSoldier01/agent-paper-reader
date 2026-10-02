@@ -6,7 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 from reader import store
 from reader.importer import import_document
-from reader.workflow import submit, user_edit, tasks, validate, fingerprint, note_status, project_document
+from reader.workflow import (
+    submit, user_edit, tasks, validate, fingerprint, note_status, project_document, _short_resolution,
+)
 from reader.store import digest, Conflict
 from reader.server import app, TOKEN
 
@@ -409,3 +411,386 @@ def test_sparse_pending_context_is_local_neighbors_not_span():
     assert len(view['context']) <= 6
     assert len(json.dumps(view['context'])) < 761_000
     assert len(view['section_context']) <= 24
+
+
+def _patch_issues(doc, issues):
+    def apply(current):
+        current['issues'] = issues
+    return store.mutate(doc['id'], doc['revision'], apply)
+
+
+_LIMITATION_RESOLUTION = (
+    'Single-file TeX does not compile; includegraphics assets stay unembedded as a product limit.'
+)
+_LIMITATION_EVIDENCE = (
+    'checked sample ids tex-includegraphics-1 and tex-includegraphics-2 against the source file; no compile.'
+)
+
+
+def test_limitation_batch_applies_to_matching_unresolved_only(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'tex-includegraphics-1', 'message': 'fig 1', 'resolution': None},
+        {'id': 'tex-includegraphics-2', 'message': 'fig 2', 'resolution': None},
+        {'id': 'tex-includegraphics-3', 'message': 'fig 3', 'resolution': None},
+        {'id': 'tex-includegraphics-99', 'message': 'already', 'resolution': 'already resolved previously by hand'},
+        {'id': 'image-b00001', 'message': 'remote or missing', 'resolution': None},
+    ])
+    saved = send(seeded, 'resolve', limitations=[{
+        'category': 'tex-includegraphics',
+        'resolution': _LIMITATION_RESOLUTION,
+        'evidence': _LIMITATION_EVIDENCE,
+    }])
+    by_id = {item['id']: item for item in saved['issues']}
+    for key in ('tex-includegraphics-1', 'tex-includegraphics-2', 'tex-includegraphics-3'):
+        assert by_id[key]['resolution'] == _LIMITATION_RESOLUTION
+        assert by_id[key]['resolution_evidence'] == _LIMITATION_EVIDENCE
+        assert by_id[key]['resolved_by'] == 'limitation_batch'
+    assert by_id['tex-includegraphics-99']['resolution'] == 'already resolved previously by hand'
+    assert by_id['tex-includegraphics-99'].get('resolved_by') is None
+    assert by_id['image-b00001']['resolution'] is None
+    aliased = send(saved, 'resolve_limitations', limitations=[{
+        'category': 'image',
+        'resolution': 'HTML/Markdown remote or missing images are not fetched; local-archive product limit.',
+        'evidence': 'checked sample image-b00001; source file has a missing local image path.',
+    }])
+    image = next(item for item in aliased['issues'] if item['id'] == 'image-b00001')
+    assert image['resolution'].startswith('HTML/Markdown')
+    assert image['resolved_by'] == 'limitation_batch'
+    assert next(item for item in aliased['issues'] if item['id'] == 'tex-includegraphics-99')['resolution'] == (
+        'already resolved previously by hand'
+    )
+
+
+def test_limitation_batch_rejects_empty_or_weak_evidence(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'tex-includegraphics-1', 'message': 'fig', 'resolution': None},
+    ])
+    base = {'category': 'tex-includegraphics', 'resolution': _LIMITATION_RESOLUTION}
+    with pytest.raises(ValueError, match='evidence'):
+        send(seeded, 'resolve', limitations=[{**base}])
+    for evidence in (
+        '',
+        '   ',
+        'too short to count',
+        'ignore',
+        '跳过',
+        'ignore ignore ignore ignore ignore ignore ignore',
+        '已知限制已知限制已知限制已知限制已知限制',
+        'x' * 24,
+    ):
+        with pytest.raises(ValueError):
+            send(seeded, 'resolve', limitations=[{**base, 'evidence': evidence}])
+    with pytest.raises(ValueError, match='explicit resolution'):
+        send(seeded, 'resolve', issues=[{'id': 'tex-includegraphics-1', 'resolution': '  '}])
+    leftover = store.read(seeded['id'])['issues']
+    assert leftover[0]['resolution'] is None
+
+
+def test_limitation_batch_rejects_disallowed_body_categories(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'page-1', 'message': 'scan', 'resolution': None},
+        {'id': 'docx-sym-1', 'message': 'unknown symbol', 'resolution': None},
+    ])
+    body = {
+        'resolution': 'Inspected original pages and recorded an unreadable-body limitation for honesty.',
+        'evidence': 'checked sample page-1 against the scanned source file; encoding is garbled.',
+    }
+    with pytest.raises(ValueError, match='page'):
+        send(seeded, 'resolve', limitations=[{'category': 'page', **body}])
+    with pytest.raises(ValueError, match='docx-sym'):
+        send(seeded, 'resolve', limitations=[{'category': 'docx-sym', **body}])
+    frozen = store.read(seeded['id'])
+    assert all(item['resolution'] is None for item in frozen['issues'])
+    long_res = (
+        'Inspected original page PNG; body text is an unreadable scan and OCR is outside product scope.'
+    )
+    saved = send(seeded, 'resolve', issues=[{'id': 'page-1', 'resolution': long_res}])
+    by_id = {item['id']: item for item in saved['issues']}
+    assert by_id['page-1']['resolution'] == long_res
+    assert by_id['docx-sym-1']['resolution'] is None
+
+
+def test_limitation_batch_rejects_unknown_category_and_zero_matches(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+    ])
+    good = {
+        'resolution': 'HTML remote image is not fetched; this is the local-archive product limit.',
+        'evidence': 'checked sample image-b00001; source file has a remote src and missing local file.',
+    }
+    with pytest.raises(ValueError, match='issues and/or limitations'):
+        send(seeded, 'resolve')
+    with pytest.raises(ValueError, match='Unknown or disallowed'):
+        send(seeded, 'resolve', limitations=[{'category': 'not-a-real-kind', **good}])
+    with pytest.raises(ValueError, match='category is required'):
+        send(seeded, 'resolve', limitations=[{'category': '  ', **good}])
+    with pytest.raises(ValueError, match='No unresolved issues match'):
+        send(seeded, 'resolve', limitations=[{'category': 'tex-input', **good}])
+    assert next(item for item in store.read(seeded['id'])['issues'] if item['id'] == 'image-b00001')['resolution'] is None
+
+
+def test_limitation_batch_validate_still_lists_unresolved_body_issues(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+        {'id': 'tex-includegraphics-1', 'message': 'fig', 'resolution': None},
+        {'id': 'page-1', 'message': 'scan', 'resolution': None},
+    ])
+    saved = send(seeded, 'resolve', limitations=[
+        {
+            'category': 'image',
+            'resolution': 'Markdown missing image is not fetched; local-archive product known limit.',
+            'evidence': 'checked sample image-b00001; source file has a missing local image.',
+        },
+        {
+            'category': 'tex-includegraphics',
+            'resolution': _LIMITATION_RESOLUTION,
+            'evidence': _LIMITATION_EVIDENCE,
+        },
+    ])
+    errors = validate(saved)['errors']
+    assert any('page-1' in item for item in errors)
+    assert not any('image-b00001' in item or 'tex-includegraphics-1' in item for item in errors)
+    resolved = send(saved, 'resolve', issues=[{
+        'id': 'page-1',
+        'resolution': 'Inspected page PNG; body text is an unreadable scan and stays an explicit per-id limit.',
+    }])
+    leftover = [item for item in validate(resolved)['errors'] if 'Unresolved extraction issue' in item]
+    assert leftover == []
+
+
+def test_batch_resolved_limitations_stay_visible_as_warnings(doc, monkeypatch):
+    import reader.server as server_module
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+        {'id': 'tex-includegraphics-1', 'message': 'fig', 'resolution': None},
+        {'id': 'tex-includegraphics-9', 'message': 'already', 'resolution': 'Figure was copied into the document folder by hand.'},
+        {'id': 'page-1', 'message': 'scan', 'resolution': None},
+    ])
+    saved = send(seeded, 'resolve', limitations=[
+        {
+            'category': 'image',
+            'resolution': 'Markdown missing image is not fetched; local-archive product known limit.',
+            'evidence': 'checked sample image-b00001; source file has a missing local image.',
+        },
+        {
+            'category': 'tex-includegraphics',
+            'resolution': _LIMITATION_RESOLUTION,
+            'evidence': _LIMITATION_EVIDENCE,
+        },
+    ])
+    result = validate(saved)
+    unresolved = [item for item in result['errors'] if item.startswith('Unresolved extraction issue:')]
+    assert unresolved == ['Unresolved extraction issue: page-1']
+    assert any(
+        'Confirmed known limitation' in item and 'not actually fixed' in item
+        and 'image-b00001' in item and '[image]' in item
+        for item in result['warnings']
+    )
+    assert any('tex-includegraphics-1' in item and '[tex-includegraphics]' in item for item in result['warnings'])
+    assert not any('tex-includegraphics-9' in item or 'page-1' in item for item in result['warnings'])
+    by_id = {item['id']: item for item in result['confirmed_limitations']}
+    assert set(by_id) == {'image-b00001', 'tex-includegraphics-1'}
+    assert by_id['image-b00001']['category'] == 'image'
+    assert by_id['image-b00001']['resolution'].startswith('Markdown missing image')
+    assert 'image-b00001' in by_id['image-b00001']['resolution_evidence']
+    assert by_id['tex-includegraphics-1']['category'] == 'tex-includegraphics'
+    for key in ('ok', 'errors', 'warnings', 'blocks', 'translated', 'reviewed'):
+        assert key in result
+    monkeypatch.setattr(server_module, 'DATA', store.DATA)
+    rows = TestClient(app).get('/api/documents').json()
+    listed = next(item for item in rows if item['id'] == saved['id'])
+    assert listed['confirmed_limitations'] == 2
+    assert listed['title'] and 'stage' in listed and 'revision' in listed
+
+
+def test_blank_batch_mark_still_blocks_and_is_not_confirmed(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None, 'resolved_by': 'limitation_batch'},
+        {'id': 'image-b00002', 'message': 'missing', 'resolution': '', 'resolved_by': 'limitation_batch',
+         'resolution_evidence': 'checked sample image-b00002 against the source file.'},
+    ])
+    result = validate(seeded)
+    assert result['confirmed_limitations'] == []
+    assert 'Unresolved extraction issue: image-b00001' in result['errors']
+    assert 'Unresolved extraction issue: image-b00002' in result['errors']
+    assert not any('image-b0000' in item for item in result['warnings'])
+
+
+def test_per_id_resolve_clears_stale_batch_evidence(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+        {'id': 'image-b00002', 'message': 'missing too', 'resolution': None},
+    ])
+    batched = send(seeded, 'resolve', limitations=[{
+        'category': 'image',
+        'resolution': 'HTML/Markdown remote or missing images are not fetched; local-archive product limit.',
+        'evidence': 'checked sample image-b00001; source file has a missing local image path.',
+    }])
+    updated = 'Inspected the markdown source; this one image was replaced by an attached local crop.'
+    saved = send(batched, 'resolve', issues=[{'id': 'image-b00001', 'resolution': updated}])
+    by_id = {item['id']: item for item in saved['issues']}
+    assert by_id['image-b00001']['resolution'] == updated
+    assert 'resolution_evidence' not in by_id['image-b00001']
+    assert 'resolved_by' not in by_id['image-b00001']
+    assert by_id['image-b00002']['resolved_by'] == 'limitation_batch'
+    assert by_id['image-b00002']['resolution_evidence']
+    confirmed = {item['id'] for item in validate(saved)['confirmed_limitations']}
+    assert confirmed == {'image-b00002'}
+    assert not any('Unresolved extraction issue: image-b00001' in item for item in validate(saved)['errors'])
+
+
+def test_same_submit_per_id_overrides_batch_metadata(doc):
+    seeded = _patch_issues(doc, [
+        {'id': 'tex-includegraphics-1', 'message': 'fig', 'resolution': None},
+        {'id': 'tex-includegraphics-2', 'message': 'fig', 'resolution': None},
+    ])
+    saved = send(seeded, 'resolve', limitations=[{
+        'category': 'tex-includegraphics',
+        'resolution': _LIMITATION_RESOLUTION,
+        'evidence': _LIMITATION_EVIDENCE,
+    }], issues=[{
+        'id': 'tex-includegraphics-1',
+        'resolution': 'Attached the missing figure from the local tex directory after inspection.',
+    }])
+    by_id = {item['id']: item for item in saved['issues']}
+    assert by_id['tex-includegraphics-1']['resolution'].startswith('Attached')
+    assert 'resolution_evidence' not in by_id['tex-includegraphics-1']
+    assert 'resolved_by' not in by_id['tex-includegraphics-1']
+    assert by_id['tex-includegraphics-2']['resolved_by'] == 'limitation_batch'
+    assert by_id['tex-includegraphics-2']['resolution_evidence'] == _LIMITATION_EVIDENCE
+    confirmed = {item['id'] for item in validate(saved)['confirmed_limitations']}
+    assert confirmed == {'tex-includegraphics-2'}
+
+
+def test_public_document_and_export_keep_limitation_warnings(doc, tmp_path, monkeypatch):
+    from pathlib import Path
+    from reader import exporter
+    from reader.exporter import public_document
+    monkeypatch.setattr(exporter, 'ROOT', tmp_path)
+    seeded = _patch_issues(doc, [
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+        {'id': 'tex-includegraphics-1', 'message': 'fig', 'resolution': None},
+    ])
+    d = send(seeded, 'resolve', limitations=[
+        {
+            'category': 'image',
+            'resolution': 'Markdown missing image is not fetched; local-archive product known limit.',
+            'evidence': 'checked sample image-b00001; source file has a missing local image.',
+        },
+        {
+            'category': 'tex-includegraphics',
+            'resolution': _LIMITATION_RESOLUTION,
+            'evidence': _LIMITATION_EVIDENCE,
+        },
+    ])
+    shown = public_document(d)
+    assert any('image-b00001' in item and 'Confirmed known limitation' in item for item in shown['validation']['warnings'])
+    assert any('tex-includegraphics-1' in item for item in shown['validation']['warnings'])
+    assert {item['id'] for item in shown['validation']['confirmed_limitations']} == {'image-b00001', 'tex-includegraphics-1'}
+    assert not any('Unresolved extraction issue' in item for item in shown['validation']['errors'])
+    d = translated(d)
+    d = send(d, 'review', blocks=[{
+        'id': b['id'], 'translation_hash': digest(b['translation']), 'note': 'Fixture exact source reviewed',
+    } for b in d['blocks']])
+    d = send(d, 'full_review', fingerprint=fingerprint(d), note='Fixture includes known image and tex limitations')
+    result = validate(d)
+    assert result['ok'] is True
+    assert {item['id'] for item in result['confirmed_limitations']} == {'image-b00001', 'tex-includegraphics-1'}
+    exported = exporter.export_html(d['id'])
+    assert exported['validation']['ok'] is True
+    assert any('Confirmed known limitation' in item and 'not actually fixed' in item for item in exported['validation']['warnings'])
+    html = Path(exported['path']).read_text(encoding='utf-8')
+    assert 'Confirmed known limitation' in html
+    assert 'image-b00001' in html
+    assert 'tex-includegraphics-1' in html
+
+
+def test_default_progress_summarizes_large_limitation_batches(doc):
+    tex_resolution = (
+        'TEX_RESOLUTION_BLOB Single-file TeX does not compile; includegraphics assets stay unembedded as a product limit. '
+        * 3
+    ).strip()
+    tex_evidence = (
+        'TEX_EVIDENCE_BLOB checked source file sample tex-includegraphics-1; ' + ('not embedded no compile. ' * 16)
+    ).strip()
+    image_resolution = 'Markdown missing image is not fetched; local archive product limit.'
+    image_evidence = 'IMAGE_EVIDENCE_BLOB checked sample image-b00001; source file has a missing local image.'
+    issues = [{'id': f'tex-includegraphics-{i}', 'message': 'fig', 'resolution': None} for i in range(1, 301)]
+    issues.extend([
+        {'id': 'image-b00001', 'message': 'missing', 'resolution': None},
+        {'id': 'image-b00002', 'message': 'missing', 'resolution': None},
+        {'id': 'page-1', 'message': 'scan body stays unresolved', 'resolution': None},
+    ])
+    seeded = _patch_issues(doc, issues)
+    saved = send(seeded, 'resolve', limitations=[
+        {'category': 'tex-includegraphics', 'resolution': tex_resolution, 'evidence': tex_evidence},
+        {'category': 'image', 'resolution': image_resolution, 'evidence': image_evidence},
+    ])
+
+    def plant_orphan(current):
+        current['notes'].append({
+            'id': 'n-orphan', 'block_id': 'missing-block', 'side': 'source',
+            'start': 0, 'end': 1, 'quote': 'Z', 'text': 'reattach me', 'difficult': False,
+        })
+
+    saved = store.mutate(saved['id'], saved['revision'], plant_orphan)
+    checked = validate(saved)
+    view = project_document(saved, view='progress')
+    full = project_document(saved, view='progress', full=True)
+    view_json = json.dumps(view, ensure_ascii=False)
+    full_json = json.dumps(full, ensure_ascii=False)
+
+    assert view['projection'] is True
+    assert view['outline_length'] >= 1 and view['unresolved_issues'] == 1
+    assert 'confirmed_limitations' not in view
+    assert 'resolution_evidence' not in view_json
+    assert view_json.count(tex_evidence) == 0 and view_json.count(image_evidence) == 0
+    assert view_json.count(tex_resolution) == 0
+    assert 'tex-includegraphics-300' not in view_json and 'tex-includegraphics-4' not in view_json
+    assert len(view_json.encode('utf-8')) < 10_000
+    assert len(view_json.encode('utf-8')) * 20 < len(full_json.encode('utf-8'))
+    assert view['ok'] == checked['ok'] and view['errors'] == checked['errors']
+    assert view['blocks'] == checked['blocks'] and view['translated'] == checked['translated']
+    assert view['reviewed'] == checked['reviewed']
+    summary = view['confirmed_limitations_summary']
+    assert summary['total'] == 302
+    assert summary['by_category']['tex-includegraphics'] == {
+        'count': 300,
+        'sample_ids': ['tex-includegraphics-1', 'tex-includegraphics-2', 'tex-includegraphics-3'],
+        'summary': _short_resolution(tex_resolution),
+    }
+    assert summary['by_category']['image'] == {
+        'count': 2,
+        'sample_ids': ['image-b00001', 'image-b00002'],
+        'summary': image_resolution,
+    }
+    assert tex_evidence not in summary['by_category']['tex-includegraphics']['summary']
+    limitation_lines = [item for item in view['warnings'] if item.startswith('Confirmed known limitation')]
+    assert len(limitation_lines) == 2
+    assert any('tex-includegraphics x300' in item and 'tex-includegraphics-1' in item for item in limitation_lines)
+    assert any('image x2' in item and 'image-b00002' in item for item in limitation_lines)
+    assert any(item == 'Note n-orphan needs reattachment' for item in view['warnings'])
+    assert view['warning_summary'] == {
+        'total': 303,
+        'confirmed_limitations': 302,
+        'other': 1,
+        'by_category': {'tex-includegraphics': 300, 'image': 2},
+    }
+
+    assert 'projection' not in full and 'outline_length' not in full
+    assert 'confirmed_limitations_summary' not in full and 'warning_summary' not in full
+    assert full['confirmed_limitations'] == checked['confirmed_limitations']
+    assert full['warnings'] == checked['warnings'] and full['errors'] == checked['errors']
+    assert len(full['confirmed_limitations']) == 302
+    assert len(full['warnings']) == 303
+    tex_rows = [item for item in full['confirmed_limitations'] if item['category'] == 'tex-includegraphics']
+    assert len(tex_rows) == 300
+    assert all(item['resolution'] == tex_resolution and item['resolution_evidence'] == tex_evidence for item in tex_rows)
+    assert {item['id'] for item in tex_rows} == {f'tex-includegraphics-{i}' for i in range(1, 301)}
+    image_rows = {item['id']: item for item in full['confirmed_limitations'] if item['category'] == 'image'}
+    assert set(image_rows) == {'image-b00001', 'image-b00002'}
+    assert image_rows['image-b00001']['resolution'] == image_resolution
+    assert image_rows['image-b00001']['resolution_evidence'] == image_evidence
+    assert full_json.count(tex_evidence) == 300
+    assert any('tex-includegraphics-300 [tex-includegraphics]' in item for item in full['warnings'])
+    assert any(item == 'Note n-orphan needs reattachment' for item in full['warnings'])

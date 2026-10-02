@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from .store import ROOT, DATA, BUNDLE, read, folder, Conflict
 from .importer import import_document
-from .workflow import user_edit
+from .workflow import user_edit, confirmed_limitations
 from .exporter import public_document, export_html
 
 app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
@@ -48,7 +48,9 @@ def documents():
     result=[]
     for path in sorted(DATA.glob('*/document.json')):
         d=json.loads(path.read_text('utf-8'))
-        result.append({k:d[k] for k in ('id','title','stage','revision')})
+        row={k:d[k] for k in ('id','title','stage','revision')}
+        row['confirmed_limitations']=len(confirmed_limitations(d))
+        result.append(row)
     return result
 
 @app.post('/api/import')
