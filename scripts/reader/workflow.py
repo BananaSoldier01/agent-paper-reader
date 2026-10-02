@@ -723,8 +723,34 @@ def _keep_extracted(payload):
     return bool(payload.get('keep_extracted')) or payload.get('mode') in ('keep', 'patch', 'keep_extracted')
 
 
-def assemble_payload(doc, operation, blocks, submission_id, agent):
-    # Wraps an Agent-authored block list. Does not invent translations or review notes.
+def _task_view(task):
+    if not isinstance(task, dict):
+        raise ValueError('task snapshot must be the JSON object returned by tasks or show')
+    # CLI prints {"ok": true, "result": {...}}; tasks()/show() return the view itself.
+    if 'revision' not in task and isinstance(task.get('result'), dict):
+        return task['result']
+    return task
+
+
+def _snapshot_translation_hashes(view):
+    found = {}
+    for key in ('blocks', 'context', 'section_context'):
+        rows = view.get(key)
+        if not isinstance(rows, list):
+            continue
+        for block in rows:
+            if not isinstance(block, dict):
+                continue
+            block_id = block.get('id')
+            value = block.get('translation_hash')
+            if block_id and isinstance(value, str) and value.strip() and block_id not in found:
+                found[block_id] = value
+    return found
+
+
+def assemble_payload(doc, operation, blocks, submission_id, agent, task=None):
+    # Bind revision and review hashes to the tasks/show snapshot the agent read.
+    # Does not invent translations, review notes, or hashes of the live document.
     if operation not in ('translate', 'review'):
         raise ValueError('assemble operation must be translate or review')
     if not isinstance(blocks, list) or not blocks:
@@ -733,19 +759,31 @@ def assemble_payload(doc, operation, blocks, submission_id, agent):
         raise ValueError('submission_id is required')
     if not isinstance(agent, str) or not agent.strip():
         raise ValueError('agent is required')
-    by_id = {block['id']: block for block in doc['blocks']}
+    if task is None:
+        raise ValueError('task snapshot is required to bind revision; refusing to stamp the latest document revision')
+    view = _task_view(task)
+    revision = view.get('revision')
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise ValueError('task snapshot is required to bind revision; refusing to stamp the latest document revision')
+    snapshot_id = view.get('document_id') or view.get('id')
+    if isinstance(snapshot_id, str) and doc is not None and snapshot_id != doc.get('id'):
+        raise ValueError('task snapshot document_id does not match this document')
+    hashes = _snapshot_translation_hashes(view) if operation == 'review' else {}
     prepared = []
     for item in blocks:
         if not isinstance(item, dict) or not item.get('id'):
             raise ValueError('each assembled block needs an id')
         row = dict(item)
         if operation == 'review' and not row.get('translation_hash'):
-            block = by_id.get(row['id'])
-            if not block or not block.get('translation'):
-                raise ValueError(f"{row['id']}: no current translation to hash")
-            row['translation_hash'] = digest(block['translation'])
+            bound = hashes.get(row['id'])
+            if not bound:
+                raise ValueError(
+                    f"{row['id']}: task snapshot is required to bind translation_hash; "
+                    'refusing to hash the latest translation'
+                )
+            row['translation_hash'] = bound
         prepared.append(row)
-    return {'revision': doc['revision'], 'submission_id': submission_id, 'agent': agent,
+    return {'revision': revision, 'submission_id': submission_id, 'agent': agent,
             'operation': operation, 'blocks': prepared}
 
 

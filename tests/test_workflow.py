@@ -881,31 +881,102 @@ def test_assemble_binds_revision_and_keeps_agent_hash(doc):
     block = doc['blocks'][0]
     item = {'id': block['id'], 'translation': {'text': '标题', 'pairs': [
         {'id': 'g1', 'source': [[0, len(block['text'])]], 'target': [[0, 2]]}]}}
-    payload = assemble_payload(doc, 'translate', [item], 'asm-tr', 'agent name')
-    assert payload['revision'] == before
+    snapshot = tasks(doc)
+    with pytest.raises(ValueError, match='task snapshot'):
+        assemble_payload(doc, 'translate', [item], 'asm-tr', 'agent name')
+    payload = assemble_payload(doc, 'translate', [item], 'asm-tr', 'agent name', snapshot)
+    assert payload['revision'] == before == snapshot['revision']
     assert payload['submission_id'] == 'asm-tr' and payload['agent'] == 'agent name'
     assert payload['operation'] == 'translate' and payload['blocks'] == [item]
     assert store.read(doc['id'])['revision'] == before
+    wrapped = assemble_payload(doc, 'translate', [item], 'asm-wrap', 'agent name', {'ok': True, 'result': snapshot})
+    assert wrapped['revision'] == snapshot['revision']
+    with pytest.raises(ValueError, match='does not match'):
+        assemble_payload(doc, 'translate', [item], 'asm-other', 'agent name', {'revision': before, 'document_id': 'a' * 24})
 
     reviewed = translated(doc)
     target = reviewed['blocks'][0]
-    filled = assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'second pass'}], 'asm-rv', 'agent name')
-    assert filled['revision'] == reviewed['revision']
+    review_snapshot = tasks(reviewed)
+    with pytest.raises(ValueError, match='task snapshot'):
+        assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'second pass'}], 'asm-rv', 'agent name')
+    filled = assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'second pass'}], 'asm-rv', 'agent name', review_snapshot)
+    assert filled['revision'] == reviewed['revision'] == review_snapshot['revision']
     assert filled['blocks'][0]['translation_hash'] == digest(target['translation'])
     assert filled['blocks'][0]['note'] == 'second pass'
+    section_only = {
+        'revision': review_snapshot['revision'], 'document_id': reviewed['id'], 'blocks': [],
+        'section_context': [row for row in review_snapshot['section_context'] if row['id'] == target['id']],
+    }
+    from_section = assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'from section'}], 'asm-sec', 'agent name', section_only)
+    assert from_section['blocks'][0]['translation_hash'] == digest(target['translation'])
     kept = assemble_payload(reviewed, 'review', [{
         'id': target['id'], 'translation_hash': 'deadbeef', 'note': 'kept',
-    }], 'asm-keep', 'agent name')
+    }], 'asm-keep', 'agent name', review_snapshot)
     assert kept['blocks'][0]['translation_hash'] == 'deadbeef'
+    assert kept['revision'] == review_snapshot['revision']
     blank = assemble_payload(reviewed, 'review', [{
         'id': target['id'], 'translation_hash': '', 'note': 'fill me',
-    }], 'asm-blank', 'agent name')
+    }], 'asm-blank', 'agent name', review_snapshot)
     assert blank['blocks'][0]['translation_hash'] == digest(target['translation'])
-    missing_note = assemble_payload(reviewed, 'review', [{'id': target['id']}], 'asm-nonote', 'agent name')
+    missing_note = assemble_payload(reviewed, 'review', [{'id': target['id']}], 'asm-nonote', 'agent name', review_snapshot)
     with pytest.raises(ValueError, match='Review evidence'):
         submit(reviewed['id'], missing_note)
-    with pytest.raises(ValueError, match='no current translation'):
+    with pytest.raises(ValueError, match='task snapshot'):
         assemble_payload(doc, 'review', [{'id': block['id'], 'note': 'too early'}], 'asm-early', 'agent name')
+    with pytest.raises(ValueError, match='translation_hash'):
+        assemble_payload(doc, 'review', [{'id': block['id'], 'note': 'too early'}], 'asm-early', 'agent name', tasks(doc))
+    stale = {'revision': before, 'document_id': doc['id']}
+    stale_payload = assemble_payload(reviewed, 'translate', [item], 'asm-stale', 'agent name', stale)
+    assert stale_payload['revision'] == before
+    assert stale_payload['revision'] != reviewed['revision']
+
+
+def test_assemble_review_does_not_silently_approve_changed_translation(doc):
+    reviewed = translated(doc)
+    target = reviewed['blocks'][0]
+    snapshot = tasks(reviewed)
+    old_revision = snapshot['revision']
+    old_hash = next(row['translation_hash'] for row in snapshot['blocks'] if row['id'] == target['id'])
+    assert old_hash == digest(target['translation'])
+    changed = user_edit(reviewed['id'], {
+        'revision': reviewed['revision'], 'operation': 'translation',
+        'block_id': target['id'], 'pair_id': 'g1', 'text': '用户改过的译文',
+    })
+    live = next(block for block in changed['blocks'] if block['id'] == target['id'])
+    new_hash = digest(live['translation'])
+    assert changed['revision'] != old_revision and new_hash != old_hash
+    pending_before = pending_counts(changed)['pending_review']
+    assert pending_before > 0
+    notes = [{'id': row['id'], 'note': 'reviewed the text I read'} for row in snapshot['blocks']]
+    assert notes and len(notes) == pending_before
+
+    with pytest.raises(ValueError, match='task snapshot'):
+        assemble_payload(changed, 'review', notes, 'silent', 'agent')
+
+    stamped = assemble_payload(changed, 'review', notes, 'from-snapshot', 'agent', snapshot)
+    assert stamped['revision'] == old_revision
+    stamped_hash = next(row['translation_hash'] for row in stamped['blocks'] if row['id'] == target['id'])
+    assert stamped_hash == old_hash and stamped_hash != new_hash
+    with pytest.raises(Conflict):
+        submit(changed['id'], stamped)
+
+    current = {'revision': changed['revision'], 'document_id': changed['id']}
+    explicit = []
+    for block in changed['blocks']:
+        if block['kind'] in {'figure', 'formula', 'code', 'page', 'excluded'} or not block.get('translation'):
+            continue
+        bound = old_hash if block['id'] == target['id'] else digest(block['translation'])
+        explicit.append({'id': block['id'], 'translation_hash': bound, 'note': 'explicit hash from the read'})
+    explicit_payload = assemble_payload(changed, 'review', explicit, 'explicit-old', 'agent', current)
+    assert explicit_payload['revision'] == changed['revision']
+    assert next(row['translation_hash'] for row in explicit_payload['blocks'] if row['id'] == target['id']) == old_hash
+    with pytest.raises(ValueError, match='current translation hash'):
+        submit(changed['id'], explicit_payload)
+
+    saved = store.read(changed['id'])
+    assert saved['revision'] == changed['revision']
+    assert pending_counts(saved)['pending_review'] == pending_before
+    assert pending_counts(saved)['pending_review'] != 0
 
 
 def test_cli_limit_pretty_assemble_and_submit_counts(doc, monkeypatch, capsys, tmp_path):
@@ -955,15 +1026,28 @@ def test_cli_limit_pretty_assemble_and_submit_counts(doc, monkeypatch, capsys, t
     blocks_path.write_text(json.dumps([{'id': block['id'], 'translation': {'text': '标题', 'pairs': [
         {'id': 'g1', 'source': [[0, len(block['text'])]], 'target': [[0, 2]]}]}}], ensure_ascii=False), encoding='utf-8')
     code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
-                    '--submission-id', 'cli-default', '--agent', 'tester')
+                    '--submission-id', 'cli-missing-task', '--agent', 'tester')
+    assert code == 1 and 'task snapshot' in json.loads(raw)['error']
+    task_path = tmp_path/'tasks.json'
+    task_path.write_text(json.dumps({'ok': True, 'result': {'revision': doc['revision'], 'document_id': doc['id']}},
+                                    ensure_ascii=False), encoding='utf-8')
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-default', '--agent', 'tester', '--task', str(task_path))
     assert code == 0
     default_result = json.loads(raw)['result']
     default_path = store.ROOT / 'submissions' / f'{doc["id"]}-translate-cli-default.json'
     assert default_result['path'] == str(default_path) and default_path.is_file()
     assert json.loads(default_path.read_text(encoding='utf-8'))['revision'] == doc['revision']
+    sentinel_task = tmp_path/'sentinel-task.json'
+    sentinel_task.write_text(json.dumps({'revision': doc['revision'] + 99}), encoding='utf-8')
+    sentinel_out = tmp_path/'sentinel.json'
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-sentinel', '--agent', 'tester', '--task', str(sentinel_task),
+                    '--out', str(sentinel_out))
+    assert code == 0 and json.loads(sentinel_out.read_text(encoding='utf-8'))['revision'] == doc['revision'] + 99
     out = tmp_path/'payload.json'
     code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
-                    '--submission-id', 'cli-asm', '--agent', 'tester', '--out', str(out))
+                    '--submission-id', 'cli-asm', '--agent', 'tester', '--task', str(task_path), '--out', str(out))
     assert code == 0
     result = json.loads(raw)['result']
     assert result['path'] == str(out) and result['revision'] == doc['revision']

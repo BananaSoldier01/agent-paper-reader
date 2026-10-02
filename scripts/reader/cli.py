@@ -38,6 +38,7 @@ def main():
     p.add_argument('--blocks', required=True)
     p.add_argument('--submission-id', required=True)
     p.add_argument('--agent', required=True)
+    p.add_argument('--task', help='tasks/show JSON captured when the agent read the work')
     p.add_argument('--out')
     p=commands.add_parser('crop', parents=[common]); p.add_argument('document_id'); p.add_argument('--page',type=int,required=True); p.add_argument('--bbox',nargs=4,type=float,required=True)
     p=commands.add_parser('serve', parents=[common]); p.add_argument('--port',type=int,default=8765)
@@ -56,7 +57,8 @@ def main():
         elif args.command=='assemble':
             d=read(args.document_id)
             blocks=json.loads(Path(args.blocks).read_text('utf-8'))
-            payload=assemble_payload(d, args.operation, blocks, args.submission_id, args.agent)
+            task=json.loads(Path(args.task).read_text('utf-8')) if args.task else None
+            payload=assemble_payload(d, args.operation, blocks, args.submission_id, args.agent, task)
             if args.out:
                 path=Path(args.out)
             else:

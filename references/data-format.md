@@ -33,14 +33,14 @@
 
 ## 组装提交信封
 
-`assemble` 只给 Agent 写好的块列表包上当前文档的 `revision` 和 `submission_id/agent/operation`。它不发明译文、不自动写复核意见、不跳过检查。`submit` 仍执行对齐、数字、复核说明和全文复核等原有门禁。
+`assemble` 只给 Agent 写好的块列表包上**读取任务时**的 `revision` 和 `submission_id/agent/operation`。revision 和复核哈希都来自当时的 `tasks`/`show` 快照（`--task`），不取实时文档上的最新 revision，也不根据当前译文现算哈希。它不发明译文、不自动写复核意见、不跳过检查。`submit` 仍执行对齐、数字、复核说明和全文复核等原有门禁。
 
 ```sh
-assemble DOC_ID translate --blocks blocks.json --submission-id ID --agent NAME [--out payload.json]
-assemble DOC_ID review --blocks blocks.json --submission-id ID --agent NAME [--out payload.json]
+assemble DOC_ID translate --blocks blocks.json --submission-id ID --agent NAME --task tasks.json [--out payload.json]
+assemble DOC_ID review --blocks blocks.json --submission-id ID --agent NAME --task tasks.json [--out payload.json]
 ```
 
-`blocks.json` 只是块列表。翻译：`[{"id":"b00001","translation":{...}}]`。复核：`[{"id":"b00001","note":"第二轮核对原文含义和条件"}]`。复核项若省略 `translation_hash`（或空字符串），会填上该块当前译文的摘要；若已提供则原样保留。`note` 仍必须在 `submit` 时非空。默认把 UTF-8 JSON 写到工作目录 `submissions/<document_id>-<operation>-<submission_id>.json`；`--out` 可指定路径。成功时外层仍是 `{"ok":true,"result":...}`，`result` 只有 `path`、`revision`、`operation`、`block_count`，不返回文档。
+`blocks.json` 只是块列表。翻译：`[{"id":"b00001","translation":{...}}]`。复核：`[{"id":"b00001","note":"第二轮核对原文含义和条件"}]`。`tasks.json` 是当时 `tasks` 或 `show` 的 JSON（CLI 的 `{"ok":true,"result":...}` 或其中的 `result` 均可）。信封的 `revision` 用这份快照里的 revision。复核项若已写 `translation_hash` 则原样保留；若省略或为空，则按 id 取快照中对应块的 `translation_hash`（查 `blocks`、`context`、`section_context`），不会用实时文档的当前译文补哈希。快照须带有该字段：默认 `tasks`/`show` 投影或 `show --full` 含 `translation_hash`；`tasks --full` 的原始块没有这个字段，不能用来补哈希。没有快照、快照里没有整数 revision，或复核块在快照中没有 `translation_hash` 时，`assemble` 报错并要求提供读取任务时的快照，不会改用最新文档。`note` 仍必须在 `submit` 时非空。用户若在读取之后改了译文，用旧快照组装会带上旧 revision 和旧哈希，`submit` 因版本冲突或哈希不一致拒绝，不会把未复核的新译文标成已复核。默认把 UTF-8 JSON 写到工作目录 `submissions/<document_id>-<operation>-<submission_id>.json`；`--out` 可指定路径。成功时外层仍是 `{"ok":true,"result":...}`，`result` 只有 `path`、`revision`、`operation`、`block_count`，不返回文档。
 
 ## 提交示例
 
@@ -66,7 +66,7 @@ assemble DOC_ID review --blocks blocks.json --submission-id ID --agent NAME [--o
 ```
 复核：
 ```json
-{"revision":3,"submission_id":"review-1","agent":"current agent","operation":"review","blocks":[{"id":"b00001","translation_hash":"show --full 或当前批次投影返回的哈希","note":"第二轮核对原文含义和条件","difference_explanation":"仅在存在具体差异时说明换算或原因"}]}
+{"revision":3,"submission_id":"review-1","agent":"current agent","operation":"review","blocks":[{"id":"b00001","translation_hash":"读取任务时 tasks/show 快照里该块的哈希","note":"第二轮核对原文含义和条件","difference_explanation":"仅在存在具体差异时说明换算或原因"}]}
 ```
 全文复核：`operation: full_review`，附 `fingerprint`（取 progress）、`note`。
 来源问题：`operation: resolve`，至少提供 `issues` 或 `limitations` 之一（可同时给）。逐条仍为 `issues: [{"id":"page-3","resolution":"实际检查结果和处理方式"}]`；空或空白 resolution 拒绝。无法识读的正文保持未解决，不可仅写跳过。
