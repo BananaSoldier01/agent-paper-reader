@@ -15,7 +15,7 @@ LOCK = SKILL / 'scripts/requirements.lock.txt'
 def main():
     parser = argparse.ArgumentParser(description='Agent Paper Reader: offline HTML first; serve is optional')
     parser.add_argument('--workspace', required=True, type=Path, help='Persistent library and runtime directory outside this skill')
-    parser.add_argument('command', help='setup, doctor, or reader CLI command (import/tasks/submit/validate/export/serve)')
+    parser.add_argument('command', help='setup, doctor, or reader CLI command (import/tasks/submit/validate/export/pair-offsets/serve)')
     parser.add_argument('args', nargs=argparse.REMAINDER)
     opt = parser.parse_args()
     workspace = opt.workspace.expanduser().resolve()

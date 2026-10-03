@@ -8,6 +8,8 @@ from reader import store
 from reader.importer import import_document
 from reader.workflow import (
     submit, user_edit, tasks, validate, fingerprint, note_status, project_document, _short_resolution,
+    assemble_payload, fill_pair_offsets, check_translation, pending_counts, DEFAULT_TASK_LIMIT,
+    DEFAULT_SECTION_CONTEXT_LIMIT,
 )
 from reader.store import digest, Conflict
 from reader.server import app, TOKEN
@@ -172,7 +174,9 @@ def test_translation_projection_keeps_section_without_atoms_or_issue_bodies():
         atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
         blocks.append({'id': f'b{i:05d}', 'kind': kind, 'text': text, 'source_ids': [f'a{i:05d}'], 'asset': None,
                        'translation': {'text': '译文', 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]} if i == 0 else None,
-                       'history': [], 'review': None, 'structure_note': 'kept', 'user_edited': False})
+                       'history': [{'translation': {'text': 'HISTORY_BLOB_' + 'h'*500}, 'author': 'agent'}] if i == 1 else [],
+                       'review': None, 'structure_note': 'STRUCTURE_NOTE_BLOB_' + 's'*400, 'source_change': 'SOURCE_CHANGE_BLOB',
+                       'user_edited': False})
     unresolved = 'UNRESOLVED_BODY_' + 'x'*400
     resolved = 'RESOLVED_BODY_' + 'y'*400
     doc = {'schema_version': 1, 'id': 'b'*24, 'title': 'Terms', 'source_file': 'source.md', 'revision': 3,
@@ -190,6 +194,63 @@ def test_translation_projection_keeps_section_without_atoms_or_issue_bodies():
     assert any(b.get('translation_hash') for b in view['section_context'])
     assert view['issue_summary']['unresolved'] == 1
     assert tasks(doc)['stage'] == 'translate'
+    kept = {'id', 'kind', 'text', 'source_ids', 'asset', 'translation', 'translation_hash', 'review', 'user_edited', 'has_structure_note'}
+    chosen_ids = {b['id'] for b in view['blocks']}
+    assert all(set(b) == kept for b in view['blocks'])
+    heading = next(b for b in view['section_context'] if b['id'] == 'b00000')
+    assert heading['id'] not in chosen_ids
+    assert heading.get('text') == text and heading.get('translation_hash')
+    assert set(heading) == kept
+    for row in view['context'] + view['section_context']:
+        if row['id'] in chosen_ids:
+            assert set(row) == {'id', 'ref'} and row['ref'] is True
+            assert 'text' not in row and 'translation_hash' not in row
+        else:
+            assert set(row) == kept
+    assert all(b['has_structure_note'] is True for b in view['blocks'])
+    assert 'HISTORY_BLOB_' not in dumped and 'STRUCTURE_NOTE_BLOB_' not in dumped and 'SOURCE_CHANGE_BLOB' not in dumped
+    full_tasks = project_document(doc, full=True, view='tasks', limit=8)
+    full_dump = json.dumps(full_tasks, ensure_ascii=False)
+    assert 'HISTORY_BLOB_' in full_dump and 'STRUCTURE_NOTE_BLOB_' in full_dump
+    assert 'history' in full_tasks['blocks'][1]
+
+
+def test_default_projection_dedups_overlapping_window():
+    n = 8
+    atoms, blocks = [], []
+    for i in range(n):
+        text = f'Paragraph {i:03d} about cooling limits and nearby context.'
+        atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
+        blocks.append({'id': f'b{i:05d}', 'kind': 'heading' if i == 0 else 'paragraph', 'text': text,
+                       'source_ids': [f'a{i:05d}'], 'asset': None, 'translation': None, 'history': [],
+                       'review': None, 'structure_note': 'kept', 'user_edited': False})
+    doc = {'schema_version': 1, 'id': 'e'*24, 'title': 'Overlap', 'source_file': 'source.md', 'revision': 2,
+           'stage': 'translate', 'atoms': atoms, 'blocks': blocks, 'terms': [{'id': 't1', 'en': 'PUE', 'zh': '电能利用效率', 'definition': '比率'}],
+           'notes': [], 'structure_review': {'agent': 'a', 'note': 'n'}, 'terms_review': {'agent': 'a', 'note': 'n'},
+           'full_review': None, 'issues': []}
+    limit = 3
+    for view_name in ('tasks', 'show'):
+        view = project_document(doc, view=view_name, limit=limit)
+        chosen_ids = {row['id'] for row in view['blocks']}
+        assert chosen_ids == {f'b{i:05d}' for i in range(limit)}
+        assert all('text' in row and row.get('ref') is not True for row in view['blocks'])
+        neighbor = next(row for row in view['context'] if row['id'] == 'b00003')
+        assert 'text' in neighbor and neighbor.get('ref') is not True
+        for key in ('context', 'section_context'):
+            for row in view[key]:
+                if row['id'] in chosen_ids:
+                    assert row == {'id': row['id'], 'ref': True}
+                    assert 'text' not in row and 'translation_hash' not in row
+                else:
+                    assert 'text' in row and row.get('ref') is not True
+    full_tasks = project_document(doc, full=True, view='tasks', limit=limit)
+    chosen_ids = {row['id'] for row in full_tasks['blocks']}
+    for key in ('context', 'section_context'):
+        for row in full_tasks[key]:
+            assert 'text' in row
+            assert row.get('ref') is not True
+            if row['id'] in chosen_ids:
+                assert row['text'] == next(b['text'] for b in doc['blocks'] if b['id'] == row['id'])
 
 
 def test_cli_projection_and_full_switch(tmp_path, monkeypatch, capsys):
@@ -705,6 +766,11 @@ def test_public_document_and_export_keep_limitation_warnings(doc, tmp_path, monk
     assert 'tex-includegraphics-1' in html
 
 
+def _repetitive_pending_error(message):
+    import re
+    return re.match(r'^\S+: (?:missing\b.*|second-pass review required)$', message) is not None
+
+
 def test_default_progress_summarizes_large_limitation_batches(doc):
     tex_resolution = (
         'TEX_RESOLUTION_BLOB Single-file TeX does not compile; includegraphics assets stay unembedded as a product limit. '
@@ -749,7 +815,16 @@ def test_default_progress_summarizes_large_limitation_batches(doc):
     assert 'tex-includegraphics-300' not in view_json and 'tex-includegraphics-4' not in view_json
     assert len(view_json.encode('utf-8')) < 10_000
     assert len(view_json.encode('utf-8')) * 20 < len(full_json.encode('utf-8'))
-    assert view['ok'] == checked['ok'] and view['errors'] == checked['errors']
+    assert view['ok'] == checked['ok']
+    structural = [item for item in checked['errors'] if not _repetitive_pending_error(item)]
+    assert structural and view['errors'] == structural and view['errors'] != checked['errors']
+    assert not any('missing translation' in item for item in view['errors'])
+    assert any('missing translation' in item for item in checked['errors'])
+    missing = view['error_summary']['by_kind']['missing translation']
+    assert view['error_summary']['total'] == len(checked['errors']) - len(structural)
+    assert missing['count'] == sum(item.endswith(': missing translation') for item in checked['errors'])
+    assert missing['sample_ids'] and len(missing['sample_ids']) <= 5
+    assert view['pending_translate'] == missing['count'] and view['pending_review'] == 0
     assert view['blocks'] == checked['blocks'] and view['translated'] == checked['translated']
     assert view['reviewed'] == checked['reviewed']
     summary = view['confirmed_limitations_summary']
@@ -779,6 +854,7 @@ def test_default_progress_summarizes_large_limitation_batches(doc):
 
     assert 'projection' not in full and 'outline_length' not in full
     assert 'confirmed_limitations_summary' not in full and 'warning_summary' not in full
+    assert 'error_summary' not in full and 'pending_translate' not in full and 'pending_review' not in full
     assert full['confirmed_limitations'] == checked['confirmed_limitations']
     assert full['warnings'] == checked['warnings'] and full['errors'] == checked['errors']
     assert len(full['confirmed_limitations']) == 302
@@ -794,3 +870,548 @@ def test_default_progress_summarizes_large_limitation_batches(doc):
     assert full_json.count(tex_evidence) == 300
     assert any('tex-includegraphics-300 [tex-includegraphics]' in item for item in full['warnings'])
     assert any(item == 'Note n-orphan needs reattachment' for item in full['warnings'])
+
+
+def _batch_doc(n=20):
+    atoms, blocks = [], []
+    for i in range(n):
+        text = f'word {i}'
+        atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i}})
+        blocks.append({'id': f'b{i:05d}', 'kind': 'paragraph', 'text': text, 'source_ids': [f'a{i:05d}'],
+                       'asset': None, 'translation': None, 'history': [], 'review': None,
+                       'structure_note': 'kept', 'user_edited': False})
+    return {'schema_version': 1, 'id': 'e'*24, 'title': 'Batch', 'source_file': 'source.md', 'revision': 2,
+            'stage': 'translate', 'atoms': atoms, 'blocks': blocks, 'terms': [], 'notes': [],
+            'structure_review': {'agent': 'a', 'note': 'n'}, 'terms_review': {'agent': 'a', 'note': 'n'},
+            'full_review': None, 'issues': []}
+
+
+def test_default_task_batch_is_sixteen():
+    doc = _batch_doc(20)
+    assert DEFAULT_TASK_LIMIT == 16 and DEFAULT_SECTION_CONTEXT_LIMIT == 24
+    assert len(tasks(doc)['blocks']) == 16
+    assert len(project_document(doc, view='tasks')['blocks']) == 16
+    assert len(project_document(doc, view='show')['blocks']) == 16
+    assert [b['id'] for b in project_document(doc, view='tasks', limit=8)['blocks']] == [f'b{i:05d}' for i in range(8)]
+
+
+def test_progress_collapses_missing_review_but_validate_lists_them(doc):
+    saved = translated(doc)
+    view = project_document(saved, view='progress')
+    full = project_document(saved, view='progress', full=True)
+    checked = validate(saved)
+    assert full['errors'] == checked['errors']
+    assert any(item.endswith(': second-pass review required') for item in checked['errors'])
+    assert not any('second-pass review required' in item for item in view['errors'])
+    assert 'Current whole-document review required' in view['errors']
+    kind = view['error_summary']['by_kind']['second-pass review required']
+    countable = [b for b in saved['blocks'] if b['kind'] not in {'figure', 'formula', 'code', 'page', 'excluded'}]
+    assert kind['count'] == len(countable)
+    assert kind['sample_messages'][0].endswith(': second-pass review required')
+    assert view['pending_translate'] == 0 and view['pending_review'] == len(countable)
+    assert pending_counts(saved) == {'pending_translate': 0, 'pending_review': len(countable)}
+
+
+def test_progress_keeps_alignment_and_number_errors(doc):
+    saved = translated(doc)
+    block = saved['blocks'][1]
+    saved = user_edit(saved['id'], {'revision': saved['revision'], 'operation': 'translation',
+                                    'block_id': block['id'], 'pair_id': 'g1', 'text': '6 MW'})
+    view = project_document(saved, view='progress')
+    checked = validate(saved)
+    assert view['ok'] is False and view['ok'] == checked['ok']
+    assert any('unexplained differences' in item for item in view['errors'])
+    assert any('unexplained differences' in item for item in checked['errors'])
+    assert any('second-pass review required' in item for item in checked['errors'])
+    assert not any('second-pass review required' in item for item in view['errors'])
+
+
+def test_assemble_binds_revision_and_keeps_agent_hash(doc):
+    before = doc['revision']
+    block = doc['blocks'][0]
+    item = {'id': block['id'], 'translation': {'text': '标题', 'pairs': [
+        {'id': 'g1', 'source': [[0, len(block['text'])]], 'target': [[0, 2]]}]}}
+    snapshot = tasks(doc)
+    with pytest.raises(ValueError, match='task snapshot'):
+        assemble_payload(doc, 'translate', [item], 'asm-tr', 'agent name')
+    payload = assemble_payload(doc, 'translate', [item], 'asm-tr', 'agent name', snapshot)
+    assert payload['revision'] == before == snapshot['revision']
+    assert payload['submission_id'] == 'asm-tr' and payload['agent'] == 'agent name'
+    assert payload['operation'] == 'translate' and payload['blocks'] == [item]
+    assert store.read(doc['id'])['revision'] == before
+    wrapped = assemble_payload(doc, 'translate', [item], 'asm-wrap', 'agent name', {'ok': True, 'result': snapshot})
+    assert wrapped['revision'] == snapshot['revision']
+    with pytest.raises(ValueError, match='does not match'):
+        assemble_payload(doc, 'translate', [item], 'asm-other', 'agent name', {'revision': before, 'document_id': 'a' * 24})
+
+    reviewed = translated(doc)
+    target = reviewed['blocks'][0]
+    review_snapshot = tasks(reviewed)
+    with pytest.raises(ValueError, match='task snapshot'):
+        assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'second pass'}], 'asm-rv', 'agent name')
+    filled = assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'second pass'}], 'asm-rv', 'agent name', review_snapshot)
+    assert filled['revision'] == reviewed['revision'] == review_snapshot['revision']
+    assert filled['blocks'][0]['translation_hash'] == digest(target['translation'])
+    assert filled['blocks'][0]['note'] == 'second pass'
+    full_row = copy.deepcopy(next(row for row in review_snapshot['blocks'] if row['id'] == target['id']))
+    section_only = {
+        'revision': review_snapshot['revision'], 'document_id': reviewed['id'], 'blocks': [],
+        'section_context': [full_row],
+    }
+    from_section = assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'from section'}], 'asm-sec', 'agent name', section_only)
+    assert from_section['blocks'][0]['translation_hash'] == digest(target['translation'])
+    for row in review_snapshot['context'] + review_snapshot['section_context']:
+        if row['id'] == target['id']:
+            assert set(row) == {'id', 'ref'} and row['ref'] is True
+            assert 'text' not in row and 'translation_hash' not in row
+    omitted = assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'from blocks'}], 'asm-shell', 'agent name', review_snapshot)
+    assert omitted['blocks'][0]['translation_hash'] == digest(target['translation'])
+    shell_only = {
+        'revision': review_snapshot['revision'], 'document_id': reviewed['id'],
+        'blocks': [{'id': target['id'], 'ref': True}],
+        'context': [{'id': target['id'], 'ref': True}],
+        'section_context': [{'id': target['id'], 'ref': True}],
+    }
+    with pytest.raises(ValueError, match='translation_hash'):
+        assemble_payload(reviewed, 'review', [{'id': target['id'], 'note': 'shells'}], 'asm-nohash', 'agent name', shell_only)
+    kept = assemble_payload(reviewed, 'review', [{
+        'id': target['id'], 'translation_hash': 'deadbeef', 'note': 'kept',
+    }], 'asm-keep', 'agent name', review_snapshot)
+    assert kept['blocks'][0]['translation_hash'] == 'deadbeef'
+    assert kept['revision'] == review_snapshot['revision']
+    blank = assemble_payload(reviewed, 'review', [{
+        'id': target['id'], 'translation_hash': '', 'note': 'fill me',
+    }], 'asm-blank', 'agent name', review_snapshot)
+    assert blank['blocks'][0]['translation_hash'] == digest(target['translation'])
+    missing_note = assemble_payload(reviewed, 'review', [{'id': target['id']}], 'asm-nonote', 'agent name', review_snapshot)
+    with pytest.raises(ValueError, match='Review evidence'):
+        submit(reviewed['id'], missing_note)
+    with pytest.raises(ValueError, match='task snapshot'):
+        assemble_payload(doc, 'review', [{'id': block['id'], 'note': 'too early'}], 'asm-early', 'agent name')
+    with pytest.raises(ValueError, match='translation_hash'):
+        assemble_payload(doc, 'review', [{'id': block['id'], 'note': 'too early'}], 'asm-early', 'agent name', tasks(doc))
+    stale = {'revision': before, 'document_id': doc['id']}
+    stale_payload = assemble_payload(reviewed, 'translate', [item], 'asm-stale', 'agent name', stale)
+    assert stale_payload['revision'] == before
+    assert stale_payload['revision'] != reviewed['revision']
+
+
+def test_assemble_review_does_not_silently_approve_changed_translation(doc):
+    reviewed = translated(doc)
+    target = reviewed['blocks'][0]
+    snapshot = tasks(reviewed)
+    old_revision = snapshot['revision']
+    old_hash = next(row['translation_hash'] for row in snapshot['blocks'] if row['id'] == target['id'])
+    assert old_hash == digest(target['translation'])
+    changed = user_edit(reviewed['id'], {
+        'revision': reviewed['revision'], 'operation': 'translation',
+        'block_id': target['id'], 'pair_id': 'g1', 'text': '用户改过的译文',
+    })
+    live = next(block for block in changed['blocks'] if block['id'] == target['id'])
+    new_hash = digest(live['translation'])
+    assert changed['revision'] != old_revision and new_hash != old_hash
+    pending_before = pending_counts(changed)['pending_review']
+    assert pending_before > 0
+    notes = [{'id': row['id'], 'note': 'reviewed the text I read'} for row in snapshot['blocks']]
+    assert notes and len(notes) == pending_before
+
+    with pytest.raises(ValueError, match='task snapshot'):
+        assemble_payload(changed, 'review', notes, 'silent', 'agent')
+
+    stamped = assemble_payload(changed, 'review', notes, 'from-snapshot', 'agent', snapshot)
+    assert stamped['revision'] == old_revision
+    stamped_hash = next(row['translation_hash'] for row in stamped['blocks'] if row['id'] == target['id'])
+    assert stamped_hash == old_hash and stamped_hash != new_hash
+    with pytest.raises(Conflict):
+        submit(changed['id'], stamped)
+
+    current = {'revision': changed['revision'], 'document_id': changed['id']}
+    explicit = []
+    for block in changed['blocks']:
+        if block['kind'] in {'figure', 'formula', 'code', 'page', 'excluded'} or not block.get('translation'):
+            continue
+        bound = old_hash if block['id'] == target['id'] else digest(block['translation'])
+        explicit.append({'id': block['id'], 'translation_hash': bound, 'note': 'explicit hash from the read'})
+    explicit_payload = assemble_payload(changed, 'review', explicit, 'explicit-old', 'agent', current)
+    assert explicit_payload['revision'] == changed['revision']
+    assert next(row['translation_hash'] for row in explicit_payload['blocks'] if row['id'] == target['id']) == old_hash
+    with pytest.raises(ValueError, match='current translation hash'):
+        submit(changed['id'], explicit_payload)
+
+    saved = store.read(changed['id'])
+    assert saved['revision'] == changed['revision']
+    assert pending_counts(saved)['pending_review'] == pending_before
+    assert pending_counts(saved)['pending_review'] != 0
+
+
+def test_cli_limit_pretty_assemble_and_submit_counts(doc, monkeypatch, capsys, tmp_path):
+    from reader.cli import main
+
+    def run(*argv):
+        monkeypatch.setattr(sys, 'argv', ['paper', *argv])
+        try:
+            main()
+            code = 0
+        except SystemExit as exc:
+            code = exc.code
+        return code, capsys.readouterr().out
+
+    wide = tmp_path/'wide.md'
+    wide.write_text('\n\n'.join(f'Paragraph {i} has enough words to be its own block.' for i in range(20)), encoding='utf-8')
+    code, raw = run('import', str(wide))
+    assert code == 0 and '\n' not in raw.strip() and raw.startswith('{"ok":true,')
+    imported = json.loads(raw)['result']
+    code, raw = run('tasks', imported['document_id'])
+    assert code == 0 and '\n' not in raw.strip()
+    assert len(json.loads(raw)['result']['blocks']) == 16
+    code, raw = run('tasks', imported['document_id'], '--limit', '4')
+    assert len(json.loads(raw)['result']['blocks']) == 4
+    code, pretty = run('tasks', imported['document_id'], '--limit', '2', '--pretty')
+    assert pretty.startswith('{\n') and '\n  "ok"' in pretty
+    assert len(json.loads(pretty)['result']['blocks']) == 2
+
+    code, raw = run('validate', doc['id'])
+    assert code == 2 and '\n' not in raw.strip()
+    validated = json.loads(raw)['result']
+    assert validated['ok'] is False and any(item.endswith(': missing translation') for item in validated['errors'])
+    code, raw = run('progress', doc['id'], '--full')
+    full_progress = json.loads(raw)['result']
+    assert code == 0 and full_progress['errors'] == validated['errors']
+    assert 'error_summary' not in full_progress and 'pending_translate' not in full_progress
+    code, raw = run('progress', doc['id'])
+    projected = json.loads(raw)['result']
+    assert projected['errors'] != validated['errors']
+    assert not any(item.endswith(': missing translation') for item in projected['errors'])
+    assert projected['error_summary']['by_kind']['missing translation']['count'] == sum(
+        item.endswith(': missing translation') for item in validated['errors'])
+    assert projected['pending_translate'] == projected['error_summary']['by_kind']['missing translation']['count']
+
+    block = doc['blocks'][0]
+    blocks_path = tmp_path/'blocks.json'
+    blocks_path.write_text(json.dumps([{'id': block['id'], 'translation': {'text': '标题', 'pairs': [
+        {'id': 'g1', 'source': [[0, len(block['text'])]], 'target': [[0, 2]]}]}}], ensure_ascii=False), encoding='utf-8')
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-missing-task', '--agent', 'tester')
+    assert code == 1 and 'task snapshot' in json.loads(raw)['error']
+    task_path = tmp_path/'tasks.json'
+    task_path.write_text(json.dumps({'ok': True, 'result': {'revision': doc['revision'], 'document_id': doc['id']}},
+                                    ensure_ascii=False), encoding='utf-8')
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-default', '--agent', 'tester', '--task', str(task_path))
+    assert code == 0
+    default_result = json.loads(raw)['result']
+    default_path = store.ROOT / 'submissions' / f'{doc["id"]}-translate-cli-default.json'
+    assert default_result['path'] == str(default_path) and default_path.is_file()
+    assert json.loads(default_path.read_text(encoding='utf-8'))['revision'] == doc['revision']
+    sentinel_task = tmp_path/'sentinel-task.json'
+    sentinel_task.write_text(json.dumps({'revision': doc['revision'] + 99}), encoding='utf-8')
+    sentinel_out = tmp_path/'sentinel.json'
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-sentinel', '--agent', 'tester', '--task', str(sentinel_task),
+                    '--out', str(sentinel_out))
+    assert code == 0 and json.loads(sentinel_out.read_text(encoding='utf-8'))['revision'] == doc['revision'] + 99
+    out = tmp_path/'payload.json'
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(blocks_path),
+                    '--submission-id', 'cli-asm', '--agent', 'tester', '--task', str(task_path), '--out', str(out))
+    assert code == 0
+    result = json.loads(raw)['result']
+    assert result['path'] == str(out) and result['revision'] == doc['revision']
+    assert result['operation'] == 'translate' and result['block_count'] == 1
+    written = json.loads(out.read_text(encoding='utf-8'))
+    assert written['revision'] == doc['revision'] and written['blocks'][0]['translation']['text'] == '标题'
+    assert store.read(doc['id'])['revision'] == doc['revision']
+    code, raw = run('submit', doc['id'], str(out))
+    assert code == 0 and '\n' not in raw.strip()
+    submitted = json.loads(raw)['result']
+    assert submitted['revision'] == doc['revision'] + 1
+    assert submitted['stage'] == 'translate'
+    assert submitted['pending_translate'] == len(doc['blocks']) - 1
+    assert submitted['pending_review'] == 1
+    assert 'blocks' not in submitted and 'atoms' not in submitted
+
+
+def test_projection_json_size_microbenchmark(doc):
+    # 80 pending blocks, each with two ~2.6k-char history entries and a repeated structure note.
+    # Measured compact UTF-8 JSON on this fixture: tasks blocks at limit 16 are 4208 B without
+    # history vs 116672 B with history (~27.7x). Default tasks view is 15618 B vs 416271 B when
+    # history is restored on blocks/context/section_context (~26.7x). Default progress is 1023 B
+    # vs progress --full 2801 B (~2.7x) while 80 missing-translation lines are listed in full.
+    n = 80
+    history_text = 'PREVIOUS TRANSLATION ' * 120
+    note = 'Checked structure against the source page and kept the extracted order. ' * 12
+
+    def expand(current):
+        atoms, blocks = [], []
+        for i in range(n):
+            text = f'Paragraph {i:03d} reports 12.5 kW at 400 K under steady load. '
+            atoms.append({'id': f'a{i:05d}', 'text': text, 'location': {'start': i, 'end': i + 1}})
+            blocks.append({
+                'id': f'b{i:05d}', 'kind': 'paragraph', 'text': text, 'source_ids': [f'a{i:05d}'],
+                'asset': None, 'translation': None,
+                'history': [
+                    {'translation': {'text': history_text, 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]}, 'author': 'agent'},
+                    {'translation': {'text': history_text + ' v2', 'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}]}, 'author': 'agent'},
+                ],
+                'review': None, 'structure_note': note, 'source_change': note, 'user_edited': False,
+            })
+        current['atoms'] = atoms
+        current['blocks'] = blocks
+        current['issues'] = []
+
+    saved = store.mutate(doc['id'], doc['revision'], expand)
+    view = project_document(saved, view='tasks')
+    assert len(view['blocks']) == 16
+    assert all('history' not in block and 'structure_note' not in block for block in view['blocks'])
+    by_id = {block['id']: block for block in saved['blocks']}
+
+    def inflate(rows):
+        fat = []
+        for row in rows:
+            block = dict(by_id[row['id']])
+            block['translation_hash'] = None
+            fat.append(block)
+        return fat
+
+    slim_blocks = len(json.dumps(view['blocks'], ensure_ascii=False).encode())
+    fat_blocks = len(json.dumps(inflate(view['blocks']), ensure_ascii=False).encode())
+    slim_view = len(json.dumps(view, ensure_ascii=False).encode())
+    fat_view = len(json.dumps({
+        **view,
+        'blocks': inflate(view['blocks']),
+        'context': inflate(view['context']),
+        'section_context': inflate(view['section_context']),
+    }, ensure_ascii=False).encode())
+    assert slim_blocks * 8 < fat_blocks, (slim_blocks, fat_blocks)
+    assert slim_view * 8 < fat_view, (slim_view, fat_view)
+
+    progress = project_document(saved, view='progress')
+    progress_full = project_document(saved, view='progress', full=True)
+    checked = validate(saved)
+    assert progress_full['errors'] == checked['errors']
+    assert progress['pending_translate'] == n and progress['pending_review'] == 0
+    missing = progress['error_summary']['by_kind']['missing translation']
+    assert missing['count'] == n and len(missing['sample_ids']) == 5
+    assert len(progress['errors']) < 5
+    assert sum(item.endswith(': missing translation') for item in progress_full['errors']) == n
+    assert all(f'b{i:05d}: missing translation' in progress_full['errors'] for i in (0, n - 1))
+    prog_bytes = len(json.dumps(progress, ensure_ascii=False).encode())
+    full_bytes = len(json.dumps(progress_full, ensure_ascii=False).encode())
+    assert prog_bytes * 2 < full_bytes, (prog_bytes, full_bytes, slim_blocks, fat_blocks, slim_view, fat_view)
+
+
+def test_fill_pair_offsets_whole_block_assemble_submit(doc):
+    block = doc['blocks'][0]
+    items = [{'id': block['id'], 'translation': {'text': '标题', 'whole': True}}]
+    out = fill_pair_offsets(doc, items)
+    assert out == [{'id': block['id'], 'translation': {
+        'text': '标题', 'pairs': [{'id': 'g1', 'source': [[0, len(block['text'])]], 'target': [[0, 2]]}]}}]
+    check_translation(block, out[0]['translation'])
+    payload = assemble_payload(doc, 'translate', out, 'po-whole', 'agent', tasks(doc))
+    saved = submit(doc['id'], payload)
+    assert next(b for b in saved['blocks'] if b['id'] == block['id'])['translation']['text'] == '标题'
+
+
+def test_fill_pair_offsets_exact_and_discontiguous_fragments(doc):
+    block = doc['blocks'][1]
+    src = block['text']
+    left, right = 'A is 5 kW.', 'B is safe.'
+    assert src.find(left) >= 0 and src.find(right) > src.find(left)
+    zh_left, zh_right = '甲是 5 千瓦。', '乙是安全的。'
+    tgt = zh_left + ' ' + zh_right
+    out = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': tgt, 'groups': [
+        {'id': 'g1', 'source': left, 'target': zh_left},
+        {'id': 'g2', 'source': right, 'target': zh_right},
+    ]}}])
+    pairs = out[0]['translation']['pairs']
+    assert pairs[0]['source'] == [[src.find(left), src.find(left) + len(left)]]
+    assert pairs[1]['source'] == [[src.find(right), src.find(right) + len(right)]]
+    assert pairs[0]['target'] == [[tgt.find(zh_left), tgt.find(zh_left) + len(zh_left)]]
+    assert pairs[1]['target'] == [[tgt.find(zh_right), tgt.find(zh_right) + len(zh_right)]]
+    check_translation(block, out[0]['translation'])
+    first, second = 'A is', '5 kW.'
+    listed = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': tgt, 'groups': [
+        {'source': [first, second], 'target': zh_left},
+        {'source': right, 'target': zh_right},
+    ]}}])
+    listed_pairs = listed[0]['translation']['pairs']
+    assert listed_pairs[0]['source'] == [
+        [src.find(first), src.find(first) + len(first)],
+        [src.find(second), src.find(second) + len(second)],
+    ]
+    assert listed_pairs[0]['id'] == 'g1'
+    check_translation(block, listed[0]['translation'])
+
+
+def test_fill_pair_offsets_repeated_fragment_uses_remaining_text():
+    src = 'ab ab'
+    block = {'id': 'b00001', 'text': src}
+    doc = {'blocks': [block]}
+    out = fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲 乙', 'groups': [
+        {'source': 'ab', 'target': '甲'},
+        {'source': 'ab', 'target': '乙'},
+    ]}}])
+    assert out[0]['translation']['pairs'][0]['source'] == [[0, 2]]
+    assert out[0]['translation']['pairs'][1]['source'] == [[3, 5]]
+    check_translation(block, out[0]['translation'])
+
+
+def test_fill_pair_offsets_fragment_not_found_and_uncovered(doc):
+    block = doc['blocks'][1]
+    with pytest.raises(ValueError, match='fragment not found') as missing:
+        fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '甲', 'groups': [
+            {'source': 'no-such-source-fragment', 'target': '甲'},
+        ]}}])
+    assert 'source' in str(missing.value)
+    with pytest.raises(ValueError, match='uncovered'):
+        fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '甲', 'groups': [
+            {'source': 'A is', 'target': '甲'},
+        ]}}])
+
+
+def test_fill_pair_offsets_refuses_automatic_split(doc):
+    block = doc['blocks'][1]
+    with pytest.raises(ValueError, match='semantic groups required') as refused:
+        fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '甲。乙。'}}])
+    assert 'g1' not in str(refused.value) or 'pairs' not in str(refused.value)
+    with pytest.raises(ValueError, match='semantic groups required'):
+        fill_pair_offsets(doc, [{'id': block['id'], 'translation': {
+            'text': '甲。乙。',
+            'pairs': [{'id': 'g1', 'source': [[0, 1]], 'target': [[0, 1]]}],
+        }}])
+
+
+def test_pair_offsets_cli_writes_assemble_blocks(doc, monkeypatch, capsys, tmp_path):
+    from reader.cli import main
+
+    def run(*argv):
+        monkeypatch.setattr(sys, 'argv', ['paper', *argv])
+        try:
+            main()
+            code = 0
+        except SystemExit as exc:
+            code = exc.code
+        return code, capsys.readouterr().out
+
+    block = doc['blocks'][0]
+    groups_path = tmp_path / 'groups.json'
+    groups_path.write_text(json.dumps([{'id': block['id'], 'translation': {'text': '标题', 'whole': True}}],
+                                      ensure_ascii=False), encoding='utf-8')
+    aligned = tmp_path / 'aligned.json'
+    code, raw = run('pair-offsets', doc['id'], '--blocks', str(groups_path), '--out', str(aligned))
+    assert code == 0
+    envelope = json.loads(raw)
+    assert envelope['ok'] is True
+    assert envelope['result'] == {'path': str(aligned), 'block_count': 1}
+    assert '标题' not in raw
+    written = json.loads(aligned.read_text(encoding='utf-8'))
+    code, raw = run('pair-offsets', doc['id'], '--blocks', str(groups_path))
+    assert code == 0
+    assert json.loads(raw)['result'] == written
+    assert written[0]['translation']['pairs'][0]['source'] == [[0, len(block['text'])]]
+    check_translation(block, written[0]['translation'])
+    task_path = tmp_path / 'tasks.json'
+    task_path.write_text(json.dumps({'ok': True, 'result': tasks(doc)}, ensure_ascii=False), encoding='utf-8')
+    payload_path = tmp_path / 'payload.json'
+    code, raw = run('assemble', doc['id'], 'translate', '--blocks', str(aligned),
+                    '--submission-id', 'po-cli', '--agent', 'tester', '--task', str(task_path),
+                    '--out', str(payload_path))
+    assert code == 0
+    code, raw = run('submit', doc['id'], str(payload_path))
+    assert code == 0
+    assert json.loads(raw)['result']['pending_review'] == 1
+
+
+def _prepared_doc(tmp_path, monkeypatch, text):
+    monkeypatch.setattr(store, 'DATA', tmp_path / 'data')
+    path = tmp_path / 'case.md'
+    path.write_text(text, encoding='utf-8')
+    current = import_document(path)
+    blocks = [{**block, 'structure_note': 'Checked against Markdown source'} for block in current['blocks']]
+    current = send(current, 'structure', blocks=blocks, note='Structure checked')
+    return send(current, 'terms', terms=[])
+
+
+def test_fill_pair_offsets_reordered_translation_submits(tmp_path, monkeypatch):
+    doc = _prepared_doc(tmp_path, monkeypatch, 'A. B.\n')
+    block = doc['blocks'][0]
+    assert block['text'] == 'A. B.'
+    out = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '乙。甲。', 'groups': [
+        {'source': 'A.', 'target': '甲。'},
+        {'source': 'B.', 'target': '乙。'},
+    ]}}])
+    pairs = out[0]['translation']['pairs']
+    assert [pair['source'] for pair in pairs] == [[[0, 2]], [[3, 5]]]
+    assert [pair['target'] for pair in pairs] == [[[2, 4]], [[0, 2]]]
+    check_translation(block, out[0]['translation'])
+    payload = assemble_payload(doc, 'translate', out, 'po-reorder', 'agent', tasks(doc))
+    saved = submit(doc['id'], payload)
+    stored = next(item for item in saved['blocks'] if item['id'] == block['id'])['translation']
+    assert stored['text'] == '乙。甲。'
+    check_translation(block, stored)
+    reversed_out = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '乙。甲。', 'groups': [
+        {'source': ['B.', 'A.'], 'target': ['乙。', '甲。']},
+    ]}}])
+    pair = reversed_out[0]['translation']['pairs'][0]
+    assert pair['source'] == [[3, 5], [0, 2]]
+    assert pair['target'] == [[0, 2], [2, 4]]
+    check_translation(block, reversed_out[0]['translation'])
+
+
+def test_fill_pair_offsets_interleaved_groups_submits(tmp_path, monkeypatch):
+    doc = _prepared_doc(tmp_path, monkeypatch, 'A B C\n')
+    block = doc['blocks'][0]
+    assert block['text'] == 'A B C'
+    out = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '甲 乙 丙', 'groups': [
+        {'source': ['A', 'C'], 'target': ['甲', '丙']},
+        {'source': 'B', 'target': '乙'},
+    ]}}])
+    pairs = out[0]['translation']['pairs']
+    assert pairs[0]['source'] == [[0, 1], [4, 5]]
+    assert pairs[1]['source'] == [[2, 3]]
+    assert pairs[0]['target'] == [[0, 1], [4, 5]]
+    assert pairs[1]['target'] == [[2, 3]]
+    check_translation(block, out[0]['translation'])
+    payload = assemble_payload(doc, 'translate', out, 'po-interleave', 'agent', tasks(doc))
+    saved = submit(doc['id'], payload)
+    stored = next(item for item in saved['blocks'] if item['id'] == block['id'])['translation']
+    assert stored['text'] == '甲 乙 丙'
+    check_translation(block, stored)
+
+
+def test_fill_pair_offsets_occurrence_and_anchor_disambiguate():
+    block = {'id': 'b00001', 'text': 'ab ab'}
+    doc = {'blocks': [block]}
+    out = fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '乙 甲', 'groups': [
+        {'source': {'text': 'ab', 'occurrence': 2}, 'target': '乙'},
+        {'source': {'text': 'ab', 'occurrence': 1}, 'target': '甲'},
+    ]}}])
+    pairs = out[0]['translation']['pairs']
+    assert [pair['source'] for pair in pairs] == [[[3, 5]], [[0, 2]]]
+    assert [pair['target'] for pair in pairs] == [[[0, 1]], [[2, 3]]]
+    check_translation(block, out[0]['translation'])
+    anchored = fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '乙 甲', 'groups': [
+        {'source': {'text': 'ab', 'anchor': ' ab'}, 'target': '乙'},
+        {'source': 'ab', 'target': '甲'},
+    ]}}])
+    assert anchored[0]['translation']['pairs'][0]['source'] == [[3, 5]]
+    assert anchored[0]['translation']['pairs'][1]['source'] == [[0, 2]]
+    check_translation(block, anchored[0]['translation'])
+    with pytest.raises(ValueError, match='fragment already used'):
+        fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲乙', 'groups': [
+            {'source': {'text': 'ab', 'occurrence': 1}, 'target': '甲'},
+            {'source': {'text': 'ab', 'occurrence': 1}, 'target': '乙'},
+        ]}}])
+    with pytest.raises(ValueError, match='fragment not found'):
+        fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲 乙', 'groups': [
+            {'source': {'text': 'ab', 'occurrence': 3}, 'target': '甲'},
+            {'source': 'ab', 'target': '乙'},
+        ]}}])
+    with pytest.raises(ValueError, match='anchor must contain fragment'):
+        fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲 乙', 'groups': [
+            {'source': {'text': 'ab', 'anchor': 'zz'}, 'target': '甲'},
+        ]}}])
+    for bad in (True, 0):
+        with pytest.raises(ValueError, match='occurrence must be a positive integer'):
+            fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲 乙', 'groups': [
+                {'source': {'text': 'ab', 'occurrence': bad}, 'target': '甲'},
+            ]}}])

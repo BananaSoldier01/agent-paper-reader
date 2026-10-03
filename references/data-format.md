@@ -15,25 +15,40 @@
 
 ## CLI 返回
 
-成功：`{"ok":true,"result":...}`；参数或提交错误 exit 1、`ok:false`。`validate` 不通过 exit 2，外层 ok 表示命令执行，内层 `result.ok` 表示完整性。`progress` 允许报告未完成状态，不返回失败退出码。`serve` 为长驻 HTTP 服务，不是 JSON 命令。
+成功：`{"ok":true,"result":...}`；参数或提交错误 exit 1、`ok:false`。`validate` 不通过 exit 2，外层 ok 表示命令执行，内层 `result.ok` 表示完整性。`progress` 允许报告未完成状态，不返回失败退出码。`serve` 为长驻 HTTP 服务，不是 JSON 命令。CLI 默认打印紧凑 JSON（`separators=(',', ':')`，无缩进）；`--pretty` 恢复两格缩进，解析方式不变。成功的 `submit` 结果含 `document_id`、`revision`、`stage`、`pending_translate`、`pending_review`，不含整份文档。
 
 `show`、`tasks`、`progress` 默认返回投影（`projection: true`），避免把整份文档灌进会话。这不改变磁盘上的 `document.json`，`schema_version` 仍是 1。显式 `--full` 时：
 
 - `show --full` 与旧版一致：整份 document、顶层 fingerprint、每个块的 `translation_hash`。
 - `tasks --full` 与旧版一致：限量全文块、整节上下文和全量 issues。
-- `progress --full` 与旧版一致：document_id、revision、stage、fingerprint 和完整 validate 摘要（含全部 `warnings` 与 `confirmed_limitations`）。不含默认投影的 `projection`、`outline_length`、`confirmed_limitations_summary` 或 `warning_summary`。
+- `progress --full` 与旧版一致：document_id、revision、stage、fingerprint 和完整 validate 摘要（含全部 `errors`、`warnings` 与 `confirmed_limitations`）。不含默认投影的 `projection`、`outline_length`、`confirmed_limitations_summary`、`warning_summary`、`error_summary`、`pending_translate` 或 `pending_review`。
 
 默认投影的公共字段：`document_id`、`id`、`revision`、`stage`、`title`、`fingerprint`、`projection`、`block_count`、`atom_count`、`source_file`、`schema_version`。
 
-结构阶段的 `show` 另含 `outline`（heading 的 id + 至多约 160 码点文本）、`issue_summary` 和全部块的摘要。块摘要只有 `id`、`kind`、截断后的 `text`、`has_structure_note`、`source_count`，没有 translation、history 或 atoms。`issue_summary` 按 issue id 前缀（去掉末尾的 `-数字` 或 `-a/-b` 加数字；若 issue 自带 `type` 则用 type）统计 `unresolved` / `resolved`，并给每类最多 3 个样例 id，不含问题正文。结构阶段的 `tasks` 使用同一摘要：`blocks` 的待办数量由 `--limit` 限制，`context` 按待办块的邻接范围返回，`section_context` 按章节窗口返回（默认最多约 24 块，可用 `--section-limit` / `--section-offset` 分段读取），并保留 `terms`。
+结构阶段的 `show` 另含 `outline`（heading 的 id + 至多约 160 码点文本）、`issue_summary` 和全部块的摘要。块摘要只有 `id`、`kind`、截断后的 `text`、`has_structure_note`、`source_count`，没有 translation、history 或 atoms。`issue_summary` 按 issue id 前缀（去掉末尾的 `-数字` 或 `-a/-b` 加数字；若 issue 自带 `type` 则用 type）统计 `unresolved` / `resolved`，并给每类最多 3 个样例 id，不含问题正文。结构阶段的 `tasks` 使用同一摘要：`blocks` 的待办数量由 `--limit` 限制（默认 16）。结构阶段的 `show` 仍列出全部块摘要。`context` 按待办块的邻接范围返回，`section_context` 按章节窗口返回（默认最多约 24 块，可用 `--section-limit` / `--section-offset` 分段读取），并保留 `terms`。
 
-翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。这些块可以含翻译所需的完整字段，并带计算出来的 `translation_hash`；不附带整份 atoms。`issue_summary` 只统计未解决项。默认投影的 `section_context` 有长度上限（默认 24 块），并附带 `section_window`（`section_total` / `section_offset` / `section_limit` / `truncated` 等）便于分段读取；CLI 可用 `--section-limit` / `--section-offset` 翻页。要整节或全篇时用 `--full`，或加大 `--section-limit`。要核对全篇译文哈希时用 `show --full`。
+翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。默认投影的每个块只含 `id`、`kind`、`text`、`source_ids`、`asset`、`translation`、`translation_hash`、`review`、`user_edited`、`has_structure_note`，不含 `history`、长 `structure_note` 或 `source_change`；不附带整份 atoms。本批 `blocks` 仍是完整投影；`context` 与 `section_context` 里若某块 id 已出现在本批 `blocks`，该处只放引用壳 `{"id":...,"ref":true}`，不含 text / translation / translation_hash 等大字段。未进入本批的邻居或章节块仍是完整投影。`--full` 不去重，仍返回原始块。`issue_summary` 只统计未解决项。默认 `--limit` 为 16，只限制本批待办数量。默认投影的 `section_context` 有长度上限（默认 24 块），并附带 `section_window`（`section_total` / `section_offset` / `section_limit` / `truncated` 等）便于分段读取；CLI 可用 `--section-limit` / `--section-offset` 翻页。要整节、history 或全篇时用 `--full`，或加大 `--section-limit`。要核对全篇译文哈希时用 `show --full`。
 
-`progress` 默认投影保留 validate 的 `ok`、`errors`、`blocks`（仍是块数量，不是块列表）、`translated`、`reviewed`，并加上 `outline_length`、`unresolved_issues`、`warning_summary`、`confirmed_limitations_summary` 和上述公共字段。不返回块正文或 atoms。`ok` 仍只由 errors 决定。已知限制不在默认投影里逐条展开。`confirmed_limitations_summary` 为 `total` 加 `by_category`：每类有 `count`、最多 3 个 `sample_ids`，以及一条共用短 `summary`（该类 resolution 压缩空白后最长约 120 字，不附 `resolution_evidence`）。`warnings` 只保留非限制类原文（例如失锚笔记）再加每类一条短注（类别、条数、样例 id、同一条短 summary）。`warning_summary` 为 `total`（压缩前的 warning 条数）、`confirmed_limitations`（被折叠的逐条限制 warning 数）、`other`（其余 warning 条数）和 `by_category`（各类条数）。完整的 `confirmed_limitations`（每项 `id`、`category`、`resolution`、`resolution_evidence`）和逐条 warning 仍由 `validate`、阅读界面、离线 HTML 和 `progress --full` 返回。
+`progress` 默认投影保留 validate 的 `ok`、`blocks`（仍是块数量，不是块列表）、`translated`、`reviewed`，并加上 `outline_length`、`unresolved_issues`、`pending_translate`、`pending_review`、`error_summary`、`warning_summary`、`confirmed_limitations_summary` 和上述公共字段。`errors` 只保留非重复的结构性/问题错误（例如未解决的提取问题、全文复核缺失、对齐或数字差异）。大量形如 `b00001: missing translation`、`b00001: second-pass review required` 以及其他 `missing …` 的逐块错误收进 `error_summary`：`total` 加 `by_kind`，每类有 `count`、最多 5 个 `sample_ids` 和对应 `sample_messages`。不返回块正文或 atoms。`ok` 仍只由完整 validate 的 errors 决定，不因折叠而变成 true。已知限制不在默认投影里逐条展开。`confirmed_limitations_summary` 为 `total` 加 `by_category`：每类有 `count`、最多 3 个 `sample_ids`，以及一条共用短 `summary`（该类 resolution 压缩空白后最长约 120 字，不附 `resolution_evidence`）。`warnings` 只保留非限制类原文（例如失锚笔记）再加每类一条短注（类别、条数、样例 id、同一条短 summary）。`warning_summary` 为 `total`（压缩前的 warning 条数）、`confirmed_limitations`（被折叠的逐条限制 warning 数）、`other`（其余 warning 条数）和 `by_category`（各类条数）。完整的 `confirmed_limitations`（每项 `id`、`category`、`resolution`、`resolution_evidence`）和逐条 warning 仍由 `validate`、阅读界面、离线 HTML 和 `progress --full` 返回。
+
+## 组装提交信封
+
+`assemble` 只给 Agent 写好的块列表包上**读取任务时**的 `revision` 和 `submission_id/agent/operation`。revision 和复核哈希都来自当时的 `tasks`/`show` 快照（`--task`），不取实时文档上的最新 revision，也不根据当前译文现算哈希。它不发明译文、不自动写复核意见、不跳过检查。`submit` 仍执行对齐、数字、复核说明和全文复核等原有门禁。
+
+```sh
+assemble DOC_ID translate --blocks blocks.json --submission-id ID --agent NAME --task tasks.json [--out payload.json]
+assemble DOC_ID review --blocks blocks.json --submission-id ID --agent NAME --task tasks.json [--out payload.json]
+```
+
+`blocks.json` 只是块列表。翻译：`[{"id":"b00001","translation":{...}}]`。复核：`[{"id":"b00001","note":"第二轮核对原文含义和条件"}]`。`tasks.json` 是当时 `tasks` 或 `show` 的 JSON（CLI 的 `{"ok":true,"result":...}` 或其中的 `result` 均可）。信封的 `revision` 用这份快照里的 revision。复核项若已写 `translation_hash` 则原样保留；若省略或为空，则按 id 取快照中对应块的 `translation_hash`（查 `blocks`、`context`、`section_context`），不会用实时文档的当前译文补哈希。默认投影的引用壳没有 `translation_hash`；此时用同一快照 `blocks` 里同 id 的完整块上的哈希。仍禁止用实时文档现算。快照须带有该字段：默认 `tasks`/`show` 投影的 `blocks` 或 `show --full` 含 `translation_hash`；`tasks --full` 的原始块没有这个字段，不能用来补哈希。没有快照、快照里没有整数 revision，或复核块在快照中没有 `translation_hash` 时，`assemble` 报错并要求提供读取任务时的快照，不会改用最新文档。`note` 仍必须在 `submit` 时非空。用户若在读取之后改了译文，用旧快照组装会带上旧 revision 和旧哈希，`submit` 因版本冲突或哈希不一致拒绝，不会把未复核的新译文标成已复核。默认把 UTF-8 JSON 写到工作目录 `submissions/<document_id>-<operation>-<submission_id>.json`；`--out` 可指定路径。成功时外层仍是 `{"ok":true,"result":...}`，`result` 只有 `path`、`revision`、`operation`、`block_count`，不返回文档。
+
+## pair-offsets
+
+`pair-offsets DOC_ID --blocks groups.json [--out aligned.json]` 从文档 `blocks` 读取同 id 的原文，按调用方给出的语义组计算 Unicode 码点偏移并检查覆盖。程序不算语义，禁止在没有语义组时按词序、标点或长度自动切分。`whole: true` 生成整块一组 `g1`（唯一允许的整块自动填充）。`groups` 的 source/target 为非空字符串、非空字符串列表，或 `{"text":"..."}` 对象。每一侧各自记下尚未占用的区间；每一组的每个片段都在剩余区间里独立做精确匹配，不用跨组或组内的单调游标，因此允许调序和交错（例如原文 `A. B.` 对译文 `乙。甲。`，或一组对应 `A` 与 `C`、另一组对应中间的 `B`）。未写消歧时，取起点最早且不与已占用区间重叠的一次匹配。同一子串多次出现时，用 `occurrence`（从 1 计）指定候选里的第几次：从左到右精确查找，上次命中的起点之后一个码点再继续，重叠出现也计数。可选 `anchor` 必须包含该 `text`；只保留落在某个锚点跨度内的匹配，`occurrence` 计的是过滤后的这一列。锚点本身不占用，只占用片段跨度。定位之后仍做与 `check_translation` 相同的覆盖和重叠检查（非空白恰好一次）。输出是 `[{id, translation:{text, pairs}}]`，可直接作为 `assemble translate --blocks`。不带 `--out` 时 CLI 打印 `{"ok":true,"result": <块列表>}`。带 `--out` 时把同一块列表写入该文件（不是信封），stdout 的 `result` 只有 `path` 和 `block_count`，不再回传译文。
 
 ## 提交示例
 
-所有提交都要求 `revision/submission_id/agent/operation`。先保存 UTF-8 JSON，再执行 `python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>" submit ID payload.json`。
+所有提交都要求 `revision/submission_id/agent/operation`。成功 `submit` 后按返回的 `stage`、`pending_translate`、`pending_review` 推进下一批。重试沿用原 payload 与 `submission_id`。版本冲突时先重新读取并核对，不要在队列已进入下一阶段时用同一批空转重交。先保存 UTF-8 JSON（或用上面的 `assemble`），再执行 `python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>" submit ID payload.json`。
 
 结构有两种提交，磁盘上的块形状不变。
 
@@ -55,7 +70,7 @@
 ```
 复核：
 ```json
-{"revision":3,"submission_id":"review-1","agent":"current agent","operation":"review","blocks":[{"id":"b00001","translation_hash":"show --full 或当前批次投影返回的哈希","note":"第二轮核对原文含义和条件","difference_explanation":"仅在存在具体差异时说明换算或原因"}]}
+{"revision":3,"submission_id":"review-1","agent":"current agent","operation":"review","blocks":[{"id":"b00001","translation_hash":"读取任务时 tasks/show 快照里该块的哈希","note":"第二轮核对原文含义和条件","difference_explanation":"仅在存在具体差异时说明换算或原因"}]}
 ```
 全文复核：`operation: full_review`，附 `fingerprint`（取 progress）、`note`。
 来源问题：`operation: resolve`，至少提供 `issues` 或 `limitations` 之一（可同时给）。逐条仍为 `issues: [{"id":"page-3","resolution":"实际检查结果和处理方式"}]`；空或空白 resolution 拒绝。无法识读的正文保持未解决，不可仅写跳过。

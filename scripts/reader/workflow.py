@@ -36,6 +36,151 @@ def check_translation(block, translation):
         raise ValueError('Every alignment group needs both sides')
 
 
+def _alignment_cover_error(block_id, side, text, spans):
+    # Same coverage rule as spans_valid, with overlap / out of range / uncovered.
+    cursor = 0
+    try:
+        ordered = sorted(spans)
+    except TypeError:
+        return f'{block_id}: {side} out of range'
+    for span in ordered:
+        if not (isinstance(span, (list, tuple)) and len(span) == 2):
+            return f'{block_id}: {side} out of range'
+        start, end = span
+        if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text)):
+            return f'{block_id}: {side} out of range'
+        if start < cursor:
+            return f'{block_id}: {side} overlap'
+        gap = text[cursor:start]
+        if gap.strip():
+            return f'{block_id}: {side} uncovered: {gap!r}'
+        cursor = end
+    tail = text[cursor:]
+    if tail.strip():
+        return f'{block_id}: {side} uncovered: {tail!r}'
+    return None
+
+
+def _group_fragments(value, block_id, side):
+    if isinstance(value, (str, dict)):
+        fragments = [value]
+    elif isinstance(value, list):
+        fragments = value
+    else:
+        raise ValueError(f'{block_id}: {side} fragment not found: {value!r}')
+    if not fragments:
+        raise ValueError(f'{block_id}: {side} fragment not found: {value!r}')
+    return fragments
+
+
+def _fragment_spec(fragment, block_id, side):
+    if isinstance(fragment, str):
+        if fragment == '':
+            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+        return fragment, None, None
+    if not isinstance(fragment, dict):
+        raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+    needle = fragment.get('text')
+    if not isinstance(needle, str) or needle == '':
+        raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+    occurrence = fragment.get('occurrence', None)
+    if occurrence is not None and (isinstance(occurrence, bool) or not isinstance(occurrence, int) or occurrence < 1):
+        raise ValueError(f'{block_id}: {side} occurrence must be a positive integer')
+    anchor = fragment.get('anchor', None)
+    if anchor is not None and (not isinstance(anchor, str) or anchor == '' or needle not in anchor):
+        raise ValueError(f'{block_id}: {side} anchor must contain fragment: {anchor!r}')
+    return needle, occurrence, anchor
+
+
+def _exact_matches(text, needle):
+    spans = []
+    start = 0
+    while True:
+        pos = text.find(needle, start)
+        if pos < 0:
+            return spans
+        spans.append((pos, pos + len(needle)))
+        start = pos + 1
+
+
+def _span_free(span, used):
+    start, end = span
+    return all(end <= used_start or start >= used_end for used_start, used_end in used)
+
+
+def _locate_fragment(text, fragment, block_id, side, used):
+    needle, occurrence, anchor = _fragment_spec(fragment, block_id, side)
+    matches = _exact_matches(text, needle)
+    if anchor is not None:
+        anchors = _exact_matches(text, anchor)
+        matches = [span for span in matches if any(a0 <= span[0] and span[1] <= a1 for a0, a1 in anchors)]
+    if occurrence is None:
+        chosen = next((span for span in matches if _span_free(span, used)), None)
+        if chosen is None:
+            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+    else:
+        if occurrence > len(matches):
+            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+        chosen = matches[occurrence - 1]
+        if not _span_free(chosen, used):
+            raise ValueError(f'{block_id}: {side} fragment already used: {fragment!r}')
+    used.append(chosen)
+    return [chosen[0], chosen[1]]
+
+
+def _locate_fragments(text, fragments, block_id, side, used):
+    return [_locate_fragment(text, fragment, block_id, side, used) for fragment in fragments]
+
+
+def fill_pair_offsets(doc, items):
+    if not isinstance(items, list):
+        raise ValueError('blocks must be a list')
+    by_id = {block['id']: block for block in doc['blocks']}
+    result = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get('id'):
+            raise ValueError('each block needs an id')
+        block_id = item['id']
+        block = by_id.get(block_id)
+        if block is None:
+            raise ValueError(f'{block_id}: block not found')
+        translation = item.get('translation')
+        if not isinstance(translation, dict) or not isinstance(translation.get('text'), str):
+            raise ValueError('Translation text required')
+        src = block['text']
+        tgt = translation['text']
+        has_whole = translation.get('whole') is True
+        groups = translation.get('groups')
+        has_groups = groups is not None
+        if has_whole and has_groups:
+            raise ValueError(f'{block_id}: cannot combine whole and groups')
+        if has_whole:
+            pairs = [{'id': 'g1', 'source': [[0, len(src)]], 'target': [[0, len(tgt)]]}]
+        elif isinstance(groups, list) and groups:
+            pairs = []
+            src_used, tgt_used = [], []
+            for index, group in enumerate(groups, 1):
+                if not isinstance(group, dict):
+                    raise ValueError(f'{block_id}: semantic groups required; refusing to split the block automatically')
+                group_id = group['id'] if group.get('id') not in (None, '') else f'g{index}'
+                source_spans = _locate_fragments(
+                    src, _group_fragments(group.get('source'), block_id, 'source'), block_id, 'source', src_used)
+                target_spans = _locate_fragments(
+                    tgt, _group_fragments(group.get('target'), block_id, 'target'), block_id, 'target', tgt_used)
+                pairs.append({'id': group_id, 'source': source_spans, 'target': target_spans})
+        else:
+            raise ValueError(f'{block_id}: semantic groups required; refusing to split the block automatically')
+        aligned = {'text': tgt, 'pairs': pairs}
+        for side, text in [('source', src), ('target', tgt)]:
+            spans = [span for pair in pairs for span in pair[side]]
+            error = _alignment_cover_error(block_id, side, text, spans)
+            if error:
+                raise ValueError(error)
+        check_translation(block, aligned)
+        result.append({'id': block_id, 'translation': aligned})
+    return result
+
+
 def differences(block):
     if not block.get('translation'):
         return []
@@ -120,6 +265,22 @@ def _stage_and_pending(doc):
         if not pending:
             stage = 'full_review' if not validate(doc)['ok'] else 'complete'
     return stage, pending
+
+
+def pending_counts(doc):
+    # Independent of the current stage so a partial translate still shows both queues.
+    # Untranslated blocks are not also counted as pending review.
+    translate = review = 0
+    for block in doc['blocks']:
+        if block['kind'] in VERBATIM:
+            continue
+        if not block.get('translation'):
+            translate += 1
+            continue
+        review_obj = block.get('review') or {}
+        if review_obj.get('translation_hash') != digest(block['translation']):
+            review += 1
+    return {'pending_translate': translate, 'pending_review': review}
 
 
 def _issue_prefix(issue):
@@ -312,9 +473,19 @@ def _block_summary(block, width=160):
 
 
 def _public_block(block):
-    shown = dict(block)
+    # Default translate/review/terms projection. History and the long structure_note stay on disk and in --full.
+    shown = {key: block.get(key) for key in ('id', 'kind', 'text', 'source_ids', 'asset', 'translation', 'review', 'user_edited')}
     shown['translation_hash'] = digest(block['translation']) if block.get('translation') else None
+    shown['has_structure_note'] = bool(str(block.get('structure_note') or '').strip())
     return shown
+
+
+def _block_ref(block):
+    return {'id': block['id'], 'ref': True}
+
+
+def _deduped_rows(blocks, chosen_ids):
+    return [_block_ref(block) if block['id'] in chosen_ids else _public_block(block) for block in blocks]
 
 
 def _outline(doc, width=160):
@@ -333,6 +504,7 @@ def _projection_meta(doc, stage):
             'source_file': doc.get('source_file'), 'schema_version': doc.get('schema_version')}
 
 
+DEFAULT_TASK_LIMIT = 16
 DEFAULT_SECTION_CONTEXT_LIMIT = 24
 
 
@@ -386,7 +558,7 @@ def _window(doc, chosen, *, section_limit=None, section_offset=None):
     return context, returned, window
 
 
-def _tasks_view(doc, limit=8, full=False, stage=None, section_limit=None, section_offset=None):
+def _tasks_view(doc, limit=DEFAULT_TASK_LIMIT, full=False, stage=None, section_limit=None, section_offset=None):
     computed, pending = _stage_and_pending(doc)
     stage = computed if full else (stage or computed)
     chosen = (doc['blocks'] if stage == 'structure' else pending)[:limit]
@@ -403,13 +575,15 @@ def _tasks_view(doc, limit=8, full=False, stage=None, section_limit=None, sectio
         return {**meta, 'terms': doc['terms'], 'outline': _outline(doc), 'issue_summary': issue_summary(doc),
                 'blocks': [_block_summary(b) for b in chosen], 'context': [_block_summary(b) for b in context],
                 'section_context': [_block_summary(b) for b in section], 'section_window': window}
+    chosen_ids = {block['id'] for block in chosen}
     return {**meta, 'terms': doc['terms'], 'outline': _outline(doc),
             'issue_summary': issue_summary(doc, unresolved_only=True),
-            'blocks': [_public_block(b) for b in chosen], 'context': [_public_block(b) for b in context],
-            'section_context': [_public_block(b) for b in section], 'section_window': window}
+            'blocks': [_public_block(b) for b in chosen],
+            'context': _deduped_rows(context, chosen_ids),
+            'section_context': _deduped_rows(section, chosen_ids), 'section_window': window}
 
 
-def tasks(doc, limit=8, full=False, section_limit=None, section_offset=None):
+def tasks(doc, limit=DEFAULT_TASK_LIMIT, full=False, section_limit=None, section_offset=None):
     return _tasks_view(doc, limit, full=full, section_limit=section_limit, section_offset=section_offset)
 
 
@@ -421,7 +595,7 @@ def _show_full(doc):
     return result
 
 
-def _show_view(doc, full=False, stage=None, limit=8, section_limit=None, section_offset=None):
+def _show_view(doc, full=False, stage=None, limit=DEFAULT_TASK_LIMIT, section_limit=None, section_offset=None):
     if full:
         return _show_full(doc)
     computed, _pending = _stage_and_pending(doc)
@@ -473,6 +647,33 @@ def _progress_warning_projection(warnings, summary):
     return other + notes, warning_summary
 
 
+# Per-block pending lines repeat once per block. Projection only; validate() keeps the full list.
+_REPETITIVE_PENDING_ERROR = re.compile(r'^(?P<id>\S+): (?P<detail>missing\b.*|second-pass review required)$')
+_PROGRESS_ERROR_SAMPLES = 5
+
+
+def _progress_error_projection(errors, samples=_PROGRESS_ERROR_SAMPLES):
+    other = []
+    by_kind = {}
+    for message in errors or []:
+        text = message if isinstance(message, str) else str(message)
+        match = _REPETITIVE_PENDING_ERROR.match(text)
+        if not match:
+            other.append(message)
+            continue
+        detail = match.group('detail')
+        bucket = by_kind.get(detail)
+        if bucket is None:
+            bucket = {'count': 0, 'sample_ids': [], 'sample_messages': []}
+            by_kind[detail] = bucket
+        bucket['count'] += 1
+        if len(bucket['sample_ids']) < samples:
+            bucket['sample_ids'].append(match.group('id'))
+            bucket['sample_messages'].append(text)
+    total = sum(bucket['count'] for bucket in by_kind.values())
+    return other, {'total': total, 'by_kind': by_kind}
+
+
 def _progress_view(doc, full=False):
     summary = validate(doc)
     if full:
@@ -482,17 +683,21 @@ def _progress_view(doc, full=False):
     unresolved = sum(1 for issue in doc.get('issues') or [] if not issue.get('resolution'))
     limitation_summary = _confirmed_limitations_summary(summary.get('confirmed_limitations'))
     warnings, warning_summary = _progress_warning_projection(summary.get('warnings'), limitation_summary)
-    projected = {key: value for key, value in summary.items() if key not in ('warnings', 'confirmed_limitations')}
+    errors, error_summary = _progress_error_projection(summary.get('errors'))
+    projected = {key: value for key, value in summary.items() if key not in ('warnings', 'confirmed_limitations', 'errors')}
     return {**_projection_meta(doc, stage),
             'outline_length': sum(block['kind'] == 'heading' for block in doc['blocks']),
             'unresolved_issues': unresolved,
             **projected,
+            'errors': errors,
+            'error_summary': error_summary,
+            **pending_counts(doc),
             'warnings': warnings,
             'warning_summary': warning_summary,
             'confirmed_limitations_summary': limitation_summary}
 
 
-def project_document(doc, *, full=False, stage=None, view='show', limit=8, section_limit=None, section_offset=None):
+def project_document(doc, *, full=False, stage=None, view='show', limit=DEFAULT_TASK_LIMIT, section_limit=None, section_offset=None):
     if view == 'progress':
         return _progress_view(doc, full=full)
     if view == 'tasks':
@@ -671,6 +876,87 @@ def _structure_keep(doc, doc_id, payload):
 
 def _keep_extracted(payload):
     return bool(payload.get('keep_extracted')) or payload.get('mode') in ('keep', 'patch', 'keep_extracted')
+
+
+def _task_view(task):
+    if not isinstance(task, dict):
+        raise ValueError('task snapshot must be the JSON object returned by tasks or show')
+    # CLI prints {"ok": true, "result": {...}}; tasks()/show() return the view itself.
+    if 'revision' not in task and isinstance(task.get('result'), dict):
+        return task['result']
+    return task
+
+
+def _snapshot_translation_hashes(view):
+    # Shells omit translation_hash; a row without one reuses this snapshot's blocks
+    # row of the same id. Never hash the live document.
+    found = {}
+    from_blocks = {}
+    rows_by_key = {}
+    for key in ('blocks', 'context', 'section_context'):
+        rows = view.get(key)
+        if not isinstance(rows, list):
+            continue
+        rows_by_key[key] = rows
+        for block in rows:
+            if not isinstance(block, dict):
+                continue
+            block_id = block.get('id')
+            value = block.get('translation_hash')
+            if block_id and isinstance(value, str) and value.strip() and block_id not in found:
+                found[block_id] = value
+            if key == 'blocks' and block_id and isinstance(value, str) and value.strip() and block_id not in from_blocks:
+                from_blocks[block_id] = value
+    for key in ('blocks', 'context', 'section_context'):
+        for block in rows_by_key.get(key) or []:
+            if not isinstance(block, dict):
+                continue
+            block_id = block.get('id')
+            value = block.get('translation_hash')
+            if not block_id or block_id in found:
+                continue
+            if not (isinstance(value, str) and value.strip()) and block_id in from_blocks:
+                found[block_id] = from_blocks[block_id]
+    return found
+
+
+def assemble_payload(doc, operation, blocks, submission_id, agent, task=None):
+    # Bind revision and review hashes to the tasks/show snapshot the agent read.
+    # Does not invent translations, review notes, or hashes of the live document.
+    if operation not in ('translate', 'review'):
+        raise ValueError('assemble operation must be translate or review')
+    if not isinstance(blocks, list) or not blocks:
+        raise ValueError('blocks must be a non-empty list')
+    if not isinstance(submission_id, str) or not submission_id.strip():
+        raise ValueError('submission_id is required')
+    if not isinstance(agent, str) or not agent.strip():
+        raise ValueError('agent is required')
+    if task is None:
+        raise ValueError('task snapshot is required to bind revision; refusing to stamp the latest document revision')
+    view = _task_view(task)
+    revision = view.get('revision')
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise ValueError('task snapshot is required to bind revision; refusing to stamp the latest document revision')
+    snapshot_id = view.get('document_id') or view.get('id')
+    if isinstance(snapshot_id, str) and doc is not None and snapshot_id != doc.get('id'):
+        raise ValueError('task snapshot document_id does not match this document')
+    hashes = _snapshot_translation_hashes(view) if operation == 'review' else {}
+    prepared = []
+    for item in blocks:
+        if not isinstance(item, dict) or not item.get('id'):
+            raise ValueError('each assembled block needs an id')
+        row = dict(item)
+        if operation == 'review' and not row.get('translation_hash'):
+            bound = hashes.get(row['id'])
+            if not bound:
+                raise ValueError(
+                    f"{row['id']}: task snapshot is required to bind translation_hash; "
+                    'refusing to hash the latest translation'
+                )
+            row['translation_hash'] = bound
+        prepared.append(row)
+    return {'revision': revision, 'submission_id': submission_id, 'agent': agent,
+            'operation': operation, 'blocks': prepared}
 
 
 def submit(doc_id, payload):
