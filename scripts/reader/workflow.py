@@ -62,7 +62,7 @@ def _alignment_cover_error(block_id, side, text, spans):
 
 
 def _group_fragments(value, block_id, side):
-    if isinstance(value, str):
+    if isinstance(value, (str, dict)):
         fragments = [value]
     elif isinstance(value, list):
         fragments = value
@@ -73,18 +73,63 @@ def _group_fragments(value, block_id, side):
     return fragments
 
 
-def _locate_fragments(text, fragments, block_id, side, cursor):
+def _fragment_spec(fragment, block_id, side):
+    if isinstance(fragment, str):
+        if fragment == '':
+            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+        return fragment, None, None
+    if not isinstance(fragment, dict):
+        raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+    needle = fragment.get('text')
+    if not isinstance(needle, str) or needle == '':
+        raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+    occurrence = fragment.get('occurrence', None)
+    if occurrence is not None and (isinstance(occurrence, bool) or not isinstance(occurrence, int) or occurrence < 1):
+        raise ValueError(f'{block_id}: {side} occurrence must be a positive integer')
+    anchor = fragment.get('anchor', None)
+    if anchor is not None and (not isinstance(anchor, str) or anchor == '' or needle not in anchor):
+        raise ValueError(f'{block_id}: {side} anchor must contain fragment: {anchor!r}')
+    return needle, occurrence, anchor
+
+
+def _exact_matches(text, needle):
     spans = []
-    for fragment in fragments:
-        if not isinstance(fragment, str) or fragment == '':
-            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
-        pos = text.find(fragment, cursor)
+    start = 0
+    while True:
+        pos = text.find(needle, start)
         if pos < 0:
+            return spans
+        spans.append((pos, pos + len(needle)))
+        start = pos + 1
+
+
+def _span_free(span, used):
+    start, end = span
+    return all(end <= used_start or start >= used_end for used_start, used_end in used)
+
+
+def _locate_fragment(text, fragment, block_id, side, used):
+    needle, occurrence, anchor = _fragment_spec(fragment, block_id, side)
+    matches = _exact_matches(text, needle)
+    if anchor is not None:
+        anchors = _exact_matches(text, anchor)
+        matches = [span for span in matches if any(a0 <= span[0] and span[1] <= a1 for a0, a1 in anchors)]
+    if occurrence is None:
+        chosen = next((span for span in matches if _span_free(span, used)), None)
+        if chosen is None:
             raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
-        end = pos + len(fragment)
-        spans.append([pos, end])
-        cursor = end
-    return spans, cursor
+    else:
+        if occurrence > len(matches):
+            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+        chosen = matches[occurrence - 1]
+        if not _span_free(chosen, used):
+            raise ValueError(f'{block_id}: {side} fragment already used: {fragment!r}')
+    used.append(chosen)
+    return [chosen[0], chosen[1]]
+
+
+def _locate_fragments(text, fragments, block_id, side, used):
+    return [_locate_fragment(text, fragment, block_id, side, used) for fragment in fragments]
 
 
 def fill_pair_offsets(doc, items):
@@ -113,15 +158,15 @@ def fill_pair_offsets(doc, items):
             pairs = [{'id': 'g1', 'source': [[0, len(src)]], 'target': [[0, len(tgt)]]}]
         elif isinstance(groups, list) and groups:
             pairs = []
-            src_cursor = tgt_cursor = 0
+            src_used, tgt_used = [], []
             for index, group in enumerate(groups, 1):
                 if not isinstance(group, dict):
                     raise ValueError(f'{block_id}: semantic groups required; refusing to split the block automatically')
                 group_id = group['id'] if group.get('id') not in (None, '') else f'g{index}'
-                source_spans, src_cursor = _locate_fragments(
-                    src, _group_fragments(group.get('source'), block_id, 'source'), block_id, 'source', src_cursor)
-                target_spans, tgt_cursor = _locate_fragments(
-                    tgt, _group_fragments(group.get('target'), block_id, 'target'), block_id, 'target', tgt_cursor)
+                source_spans = _locate_fragments(
+                    src, _group_fragments(group.get('source'), block_id, 'source'), block_id, 'source', src_used)
+                target_spans = _locate_fragments(
+                    tgt, _group_fragments(group.get('target'), block_id, 'target'), block_id, 'target', tgt_used)
                 pairs.append({'id': group_id, 'source': source_spans, 'target': target_spans})
         else:
             raise ValueError(f'{block_id}: semantic groups required; refusing to split the block automatically')

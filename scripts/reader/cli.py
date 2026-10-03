@@ -76,11 +76,14 @@ def main():
         elif args.command=='pair-offsets':
             d=read(args.document_id)
             items=json.loads(Path(args.blocks).read_text('utf-8'))
-            result=fill_pair_offsets(d, items)
+            aligned=fill_pair_offsets(d, items)
             if args.out:
                 path=Path(args.out)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+                path.write_text(json.dumps(aligned, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+                result={'path':str(path),'block_count':len(aligned)}
+            else:
+                result=aligned
         elif args.command=='submit':
             d=submit(args.document_id,json.loads(Path(args.payload).read_text('utf-8')))
             result={'document_id':d['id'],'revision':d['revision'],'stage':d['stage'],**pending_counts(d)}

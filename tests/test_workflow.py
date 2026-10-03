@@ -1301,8 +1301,12 @@ def test_pair_offsets_cli_writes_assemble_blocks(doc, monkeypatch, capsys, tmp_p
     assert code == 0
     envelope = json.loads(raw)
     assert envelope['ok'] is True
+    assert envelope['result'] == {'path': str(aligned), 'block_count': 1}
+    assert '标题' not in raw
     written = json.loads(aligned.read_text(encoding='utf-8'))
-    assert written == envelope['result']
+    code, raw = run('pair-offsets', doc['id'], '--blocks', str(groups_path))
+    assert code == 0
+    assert json.loads(raw)['result'] == written
     assert written[0]['translation']['pairs'][0]['source'] == [[0, len(block['text'])]]
     check_translation(block, written[0]['translation'])
     task_path = tmp_path / 'tasks.json'
@@ -1316,3 +1320,98 @@ def test_pair_offsets_cli_writes_assemble_blocks(doc, monkeypatch, capsys, tmp_p
     assert code == 0
     assert json.loads(raw)['result']['pending_review'] == 1
 
+
+def _prepared_doc(tmp_path, monkeypatch, text):
+    monkeypatch.setattr(store, 'DATA', tmp_path / 'data')
+    path = tmp_path / 'case.md'
+    path.write_text(text, encoding='utf-8')
+    current = import_document(path)
+    blocks = [{**block, 'structure_note': 'Checked against Markdown source'} for block in current['blocks']]
+    current = send(current, 'structure', blocks=blocks, note='Structure checked')
+    return send(current, 'terms', terms=[])
+
+
+def test_fill_pair_offsets_reordered_translation_submits(tmp_path, monkeypatch):
+    doc = _prepared_doc(tmp_path, monkeypatch, 'A. B.\n')
+    block = doc['blocks'][0]
+    assert block['text'] == 'A. B.'
+    out = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '乙。甲。', 'groups': [
+        {'source': 'A.', 'target': '甲。'},
+        {'source': 'B.', 'target': '乙。'},
+    ]}}])
+    pairs = out[0]['translation']['pairs']
+    assert [pair['source'] for pair in pairs] == [[[0, 2]], [[3, 5]]]
+    assert [pair['target'] for pair in pairs] == [[[2, 4]], [[0, 2]]]
+    check_translation(block, out[0]['translation'])
+    payload = assemble_payload(doc, 'translate', out, 'po-reorder', 'agent', tasks(doc))
+    saved = submit(doc['id'], payload)
+    stored = next(item for item in saved['blocks'] if item['id'] == block['id'])['translation']
+    assert stored['text'] == '乙。甲。'
+    check_translation(block, stored)
+    reversed_out = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '乙。甲。', 'groups': [
+        {'source': ['B.', 'A.'], 'target': ['乙。', '甲。']},
+    ]}}])
+    pair = reversed_out[0]['translation']['pairs'][0]
+    assert pair['source'] == [[3, 5], [0, 2]]
+    assert pair['target'] == [[0, 2], [2, 4]]
+    check_translation(block, reversed_out[0]['translation'])
+
+
+def test_fill_pair_offsets_interleaved_groups_submits(tmp_path, monkeypatch):
+    doc = _prepared_doc(tmp_path, monkeypatch, 'A B C\n')
+    block = doc['blocks'][0]
+    assert block['text'] == 'A B C'
+    out = fill_pair_offsets(doc, [{'id': block['id'], 'translation': {'text': '甲 乙 丙', 'groups': [
+        {'source': ['A', 'C'], 'target': ['甲', '丙']},
+        {'source': 'B', 'target': '乙'},
+    ]}}])
+    pairs = out[0]['translation']['pairs']
+    assert pairs[0]['source'] == [[0, 1], [4, 5]]
+    assert pairs[1]['source'] == [[2, 3]]
+    assert pairs[0]['target'] == [[0, 1], [4, 5]]
+    assert pairs[1]['target'] == [[2, 3]]
+    check_translation(block, out[0]['translation'])
+    payload = assemble_payload(doc, 'translate', out, 'po-interleave', 'agent', tasks(doc))
+    saved = submit(doc['id'], payload)
+    stored = next(item for item in saved['blocks'] if item['id'] == block['id'])['translation']
+    assert stored['text'] == '甲 乙 丙'
+    check_translation(block, stored)
+
+
+def test_fill_pair_offsets_occurrence_and_anchor_disambiguate():
+    block = {'id': 'b00001', 'text': 'ab ab'}
+    doc = {'blocks': [block]}
+    out = fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '乙 甲', 'groups': [
+        {'source': {'text': 'ab', 'occurrence': 2}, 'target': '乙'},
+        {'source': {'text': 'ab', 'occurrence': 1}, 'target': '甲'},
+    ]}}])
+    pairs = out[0]['translation']['pairs']
+    assert [pair['source'] for pair in pairs] == [[[3, 5]], [[0, 2]]]
+    assert [pair['target'] for pair in pairs] == [[[0, 1]], [[2, 3]]]
+    check_translation(block, out[0]['translation'])
+    anchored = fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '乙 甲', 'groups': [
+        {'source': {'text': 'ab', 'anchor': ' ab'}, 'target': '乙'},
+        {'source': 'ab', 'target': '甲'},
+    ]}}])
+    assert anchored[0]['translation']['pairs'][0]['source'] == [[3, 5]]
+    assert anchored[0]['translation']['pairs'][1]['source'] == [[0, 2]]
+    check_translation(block, anchored[0]['translation'])
+    with pytest.raises(ValueError, match='fragment already used'):
+        fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲乙', 'groups': [
+            {'source': {'text': 'ab', 'occurrence': 1}, 'target': '甲'},
+            {'source': {'text': 'ab', 'occurrence': 1}, 'target': '乙'},
+        ]}}])
+    with pytest.raises(ValueError, match='fragment not found'):
+        fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲 乙', 'groups': [
+            {'source': {'text': 'ab', 'occurrence': 3}, 'target': '甲'},
+            {'source': 'ab', 'target': '乙'},
+        ]}}])
+    with pytest.raises(ValueError, match='anchor must contain fragment'):
+        fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲 乙', 'groups': [
+            {'source': {'text': 'ab', 'anchor': 'zz'}, 'target': '甲'},
+        ]}}])
+    for bad in (True, 0):
+        with pytest.raises(ValueError, match='occurrence must be a positive integer'):
+            fill_pair_offsets(doc, [{'id': 'b00001', 'translation': {'text': '甲 乙', 'groups': [
+                {'source': {'text': 'ab', 'occurrence': bad}, 'target': '甲'},
+            ]}}])

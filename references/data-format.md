@@ -44,11 +44,11 @@ assemble DOC_ID review --blocks blocks.json --submission-id ID --agent NAME --ta
 
 ## pair-offsets
 
-`pair-offsets DOC_ID --blocks groups.json [--out aligned.json]` 从文档 `blocks` 读取同 id 的原文，按调用方给出的语义组计算 Unicode 码点偏移并检查覆盖。程序不算语义，禁止在没有语义组时按词序、标点或长度自动切分。`whole: true` 生成整块一组 `g1`（唯一允许的整块自动填充）；`groups` 的 source/target 为非空字符串或非空字符串列表，按组顺序、组内顺序在该侧剩余文本中做首次精确匹配。输出是 `[{id, translation:{text, pairs}}]`，可直接作为 `assemble translate --blocks`。成功时 CLI 打印 `{"ok":true,"result": <块列表>}`；`--out` 写入同一块列表（不是信封）。
+`pair-offsets DOC_ID --blocks groups.json [--out aligned.json]` 从文档 `blocks` 读取同 id 的原文，按调用方给出的语义组计算 Unicode 码点偏移并检查覆盖。程序不算语义，禁止在没有语义组时按词序、标点或长度自动切分。`whole: true` 生成整块一组 `g1`（唯一允许的整块自动填充）。`groups` 的 source/target 为非空字符串、非空字符串列表，或 `{"text":"..."}` 对象。每一侧各自记下尚未占用的区间；每一组的每个片段都在剩余区间里独立做精确匹配，不用跨组或组内的单调游标，因此允许调序和交错（例如原文 `A. B.` 对译文 `乙。甲。`，或一组对应 `A` 与 `C`、另一组对应中间的 `B`）。未写消歧时，取起点最早且不与已占用区间重叠的一次匹配。同一子串多次出现时，用 `occurrence`（从 1 计）指定候选里的第几次：从左到右精确查找，上次命中的起点之后一个码点再继续，重叠出现也计数。可选 `anchor` 必须包含该 `text`；只保留落在某个锚点跨度内的匹配，`occurrence` 计的是过滤后的这一列。锚点本身不占用，只占用片段跨度。定位之后仍做与 `check_translation` 相同的覆盖和重叠检查（非空白恰好一次）。输出是 `[{id, translation:{text, pairs}}]`，可直接作为 `assemble translate --blocks`。不带 `--out` 时 CLI 打印 `{"ok":true,"result": <块列表>}`。带 `--out` 时把同一块列表写入该文件（不是信封），stdout 的 `result` 只有 `path` 和 `block_count`，不再回传译文。
 
 ## 提交示例
 
-所有提交都要求 `revision/submission_id/agent/operation`。先保存 UTF-8 JSON（或用上面的 `assemble`），再执行 `python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>" submit ID payload.json`。
+所有提交都要求 `revision/submission_id/agent/operation`。成功 `submit` 后按返回的 `stage`、`pending_translate`、`pending_review` 推进下一批。重试沿用原 payload 与 `submission_id`。版本冲突时先重新读取并核对，不要在队列已进入下一阶段时用同一批空转重交。先保存 UTF-8 JSON（或用上面的 `assemble`），再执行 `python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>" submit ID payload.json`。
 
 结构有两种提交，磁盘上的块形状不变。
 
