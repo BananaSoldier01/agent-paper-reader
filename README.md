@@ -88,7 +88,7 @@
 https://github.com/BananaSoldier01/agent-paper-reader
 
 先阅读仓库 README 和 SKILL.md，从 main 分支当前源码安装完整 Skill。
-按当前 Agent 支持的方式安装；请使用 v0.3.0 精简安装包或 main 源码，包含多格式输入及 Agent 工作流改进；不要使用仅含 PDF/Markdown 的旧版 v0.1.0。
+按当前 Agent 支持的方式安装；请使用 v0.4.0 精简安装包或 main 源码，包含多格式输入、任务减载及完整复核流程；不要使用仅含 PDF/Markdown 的旧版 v0.1.0。
 请确认适合当前环境的安装目录，并检查 Python 3.12+ 等运行条件。
 保留已有配置与文献数据，完成后告诉我安装位置、是否可用，以及如何开始处理文章。
 ```
@@ -118,7 +118,7 @@ Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**
 
 需要本页所列多格式功能时，下载 [main 分支源码 ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip)，解压后将完整源码目录放入你的 Agent 支持的 Skill 目录，并命名为 `agent-paper-reader`。
 
-[v0.3.0 精简安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.3.0/agent-paper-reader.zip) 包含六种输入、默认短投影、增量结构、章节分页和搜索定位修复。[v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) 仍仅 PDF / Markdown，请勿当作最新包。
+[v0.4.0 精简安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.4.0/agent-paper-reader.zip) 包含六种输入、增量结构、章节分页和搜索定位修复，并新增任务投影去重、语义组偏移计算、快照绑定提交和已知限制披露。默认任务批量为 16，块级复核、全文复核和校验要求保持不变；实际耗时取决于文献与宿主，不保证固定提速幅度。[v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) 仍仅 PDF / Markdown，请勿当作最新包。
 
 本仓库根目录本身也是完整 Skill，入口为 [SKILL.md](SKILL.md)。可以安装完整仓库内容，**不要只复制 SKILL.md**。例如，支持 `.agents/skills` 的项目可以采用：
 

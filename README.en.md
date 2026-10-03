@@ -87,7 +87,7 @@ https://github.com/BananaSoldier01/agent-paper-reader
 
 Read the repository README and SKILL.md first, then install the complete
 Skill from the current main branch using a method supported by this Agent.
-Use the v0.3.0 slim install zip or main source for multiple input formats and the updated Agent workflow; do not install the PDF/Markdown-only v0.1.0 package.
+Use the v0.4.0 slim install zip or main source for multiple input formats, smaller task payloads, and the complete review workflow; do not install the PDF/Markdown-only v0.1.0 package.
 Confirm the appropriate installation directory and check prerequisites,
 including Python 3.12+. Preserve existing configuration and document data.
 When finished, tell me where it is installed, whether it is ready to use,
@@ -119,7 +119,7 @@ Missing dependencies, failed conversion, or unreliable output leave the original
 
 For the multiple input formats listed here, download the [main source ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip), extract it, and place the complete source directory in your Agent's Skill directory under the name `agent-paper-reader`.
 
-The [v0.3.0 slim install zip](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.3.0/agent-paper-reader.zip) includes six input formats, compact default projections, incremental structure updates, section paging, and the search-position fix. The [v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) zip remains PDF/Markdown only.
+The [v0.4.0 slim install zip](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.4.0/agent-paper-reader.zip) includes six input formats, incremental structure updates, section paging, and the search-position fix, plus deduplicated task projections, semantic-group offset calculation, snapshot-bound submissions, and visible known limitations. The default task batch is 16; block review, whole-document review, and validation requirements remain in place. Actual runtime depends on the document and host; no fixed speedup is guaranteed. The [v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) zip remains PDF/Markdown only.
 
 This repository is also a complete Skill, with [SKILL.md](SKILL.md) as its entry point. You can install the full repository contents; **do not copy only SKILL.md**. For a project supporting `.agents/skills`:
 
