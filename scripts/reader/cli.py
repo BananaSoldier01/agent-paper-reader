@@ -5,7 +5,8 @@ from pathlib import Path
 from .store import read, ROOT
 from .importer import import_document
 from .workflow import (
-    submit, validate, fingerprint, project_document, assemble_payload, pending_counts, DEFAULT_TASK_LIMIT,
+    submit, validate, fingerprint, project_document, assemble_payload, fill_pair_offsets,
+    pending_counts, DEFAULT_TASK_LIMIT,
 )
 from .exporter import export_html
 
@@ -40,6 +41,10 @@ def main():
     p.add_argument('--agent', required=True)
     p.add_argument('--task', help='tasks/show JSON captured when the agent read the work')
     p.add_argument('--out')
+    p=commands.add_parser('pair-offsets', parents=[common])
+    p.add_argument('document_id')
+    p.add_argument('--blocks', required=True)
+    p.add_argument('--out')
     p=commands.add_parser('crop', parents=[common]); p.add_argument('document_id'); p.add_argument('--page',type=int,required=True); p.add_argument('--bbox',nargs=4,type=float,required=True)
     p=commands.add_parser('serve', parents=[common]); p.add_argument('--port',type=int,default=8765)
     args=parser.parse_args()
@@ -68,6 +73,14 @@ def main():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
             result={'path':str(path),'revision':payload['revision'],'operation':payload['operation'],'block_count':len(payload['blocks'])}
+        elif args.command=='pair-offsets':
+            d=read(args.document_id)
+            items=json.loads(Path(args.blocks).read_text('utf-8'))
+            result=fill_pair_offsets(d, items)
+            if args.out:
+                path=Path(args.out)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
         elif args.command=='submit':
             d=submit(args.document_id,json.loads(Path(args.payload).read_text('utf-8')))
             result={'document_id':d['id'],'revision':d['revision'],'stage':d['stage'],**pending_counts(d)}

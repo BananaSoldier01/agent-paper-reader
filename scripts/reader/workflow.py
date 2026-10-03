@@ -36,6 +36,106 @@ def check_translation(block, translation):
         raise ValueError('Every alignment group needs both sides')
 
 
+def _alignment_cover_error(block_id, side, text, spans):
+    # Same coverage rule as spans_valid, with overlap / out of range / uncovered.
+    cursor = 0
+    try:
+        ordered = sorted(spans)
+    except TypeError:
+        return f'{block_id}: {side} out of range'
+    for span in ordered:
+        if not (isinstance(span, (list, tuple)) and len(span) == 2):
+            return f'{block_id}: {side} out of range'
+        start, end = span
+        if not (isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text)):
+            return f'{block_id}: {side} out of range'
+        if start < cursor:
+            return f'{block_id}: {side} overlap'
+        gap = text[cursor:start]
+        if gap.strip():
+            return f'{block_id}: {side} uncovered: {gap!r}'
+        cursor = end
+    tail = text[cursor:]
+    if tail.strip():
+        return f'{block_id}: {side} uncovered: {tail!r}'
+    return None
+
+
+def _group_fragments(value, block_id, side):
+    if isinstance(value, str):
+        fragments = [value]
+    elif isinstance(value, list):
+        fragments = value
+    else:
+        raise ValueError(f'{block_id}: {side} fragment not found: {value!r}')
+    if not fragments:
+        raise ValueError(f'{block_id}: {side} fragment not found: {value!r}')
+    return fragments
+
+
+def _locate_fragments(text, fragments, block_id, side, cursor):
+    spans = []
+    for fragment in fragments:
+        if not isinstance(fragment, str) or fragment == '':
+            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+        pos = text.find(fragment, cursor)
+        if pos < 0:
+            raise ValueError(f'{block_id}: {side} fragment not found: {fragment!r}')
+        end = pos + len(fragment)
+        spans.append([pos, end])
+        cursor = end
+    return spans, cursor
+
+
+def fill_pair_offsets(doc, items):
+    if not isinstance(items, list):
+        raise ValueError('blocks must be a list')
+    by_id = {block['id']: block for block in doc['blocks']}
+    result = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get('id'):
+            raise ValueError('each block needs an id')
+        block_id = item['id']
+        block = by_id.get(block_id)
+        if block is None:
+            raise ValueError(f'{block_id}: block not found')
+        translation = item.get('translation')
+        if not isinstance(translation, dict) or not isinstance(translation.get('text'), str):
+            raise ValueError('Translation text required')
+        src = block['text']
+        tgt = translation['text']
+        has_whole = translation.get('whole') is True
+        groups = translation.get('groups')
+        has_groups = groups is not None
+        if has_whole and has_groups:
+            raise ValueError(f'{block_id}: cannot combine whole and groups')
+        if has_whole:
+            pairs = [{'id': 'g1', 'source': [[0, len(src)]], 'target': [[0, len(tgt)]]}]
+        elif isinstance(groups, list) and groups:
+            pairs = []
+            src_cursor = tgt_cursor = 0
+            for index, group in enumerate(groups, 1):
+                if not isinstance(group, dict):
+                    raise ValueError(f'{block_id}: semantic groups required; refusing to split the block automatically')
+                group_id = group['id'] if group.get('id') not in (None, '') else f'g{index}'
+                source_spans, src_cursor = _locate_fragments(
+                    src, _group_fragments(group.get('source'), block_id, 'source'), block_id, 'source', src_cursor)
+                target_spans, tgt_cursor = _locate_fragments(
+                    tgt, _group_fragments(group.get('target'), block_id, 'target'), block_id, 'target', tgt_cursor)
+                pairs.append({'id': group_id, 'source': source_spans, 'target': target_spans})
+        else:
+            raise ValueError(f'{block_id}: semantic groups required; refusing to split the block automatically')
+        aligned = {'text': tgt, 'pairs': pairs}
+        for side, text in [('source', src), ('target', tgt)]:
+            spans = [span for pair in pairs for span in pair[side]]
+            error = _alignment_cover_error(block_id, side, text, spans)
+            if error:
+                raise ValueError(error)
+        check_translation(block, aligned)
+        result.append({'id': block_id, 'translation': aligned})
+    return result
+
+
 def differences(block):
     if not block.get('translation'):
         return []
@@ -335,6 +435,14 @@ def _public_block(block):
     return shown
 
 
+def _block_ref(block):
+    return {'id': block['id'], 'ref': True}
+
+
+def _deduped_rows(blocks, chosen_ids):
+    return [_block_ref(block) if block['id'] in chosen_ids else _public_block(block) for block in blocks]
+
+
 def _outline(doc, width=160):
     rows = []
     for block in doc['blocks']:
@@ -422,10 +530,12 @@ def _tasks_view(doc, limit=DEFAULT_TASK_LIMIT, full=False, stage=None, section_l
         return {**meta, 'terms': doc['terms'], 'outline': _outline(doc), 'issue_summary': issue_summary(doc),
                 'blocks': [_block_summary(b) for b in chosen], 'context': [_block_summary(b) for b in context],
                 'section_context': [_block_summary(b) for b in section], 'section_window': window}
+    chosen_ids = {block['id'] for block in chosen}
     return {**meta, 'terms': doc['terms'], 'outline': _outline(doc),
             'issue_summary': issue_summary(doc, unresolved_only=True),
-            'blocks': [_public_block(b) for b in chosen], 'context': [_public_block(b) for b in context],
-            'section_context': [_public_block(b) for b in section], 'section_window': window}
+            'blocks': [_public_block(b) for b in chosen],
+            'context': _deduped_rows(context, chosen_ids),
+            'section_context': _deduped_rows(section, chosen_ids), 'section_window': window}
 
 
 def tasks(doc, limit=DEFAULT_TASK_LIMIT, full=False, section_limit=None, section_offset=None):
@@ -733,11 +843,16 @@ def _task_view(task):
 
 
 def _snapshot_translation_hashes(view):
+    # Shells omit translation_hash; a row without one reuses this snapshot's blocks
+    # row of the same id. Never hash the live document.
     found = {}
+    from_blocks = {}
+    rows_by_key = {}
     for key in ('blocks', 'context', 'section_context'):
         rows = view.get(key)
         if not isinstance(rows, list):
             continue
+        rows_by_key[key] = rows
         for block in rows:
             if not isinstance(block, dict):
                 continue
@@ -745,6 +860,18 @@ def _snapshot_translation_hashes(view):
             value = block.get('translation_hash')
             if block_id and isinstance(value, str) and value.strip() and block_id not in found:
                 found[block_id] = value
+            if key == 'blocks' and block_id and isinstance(value, str) and value.strip() and block_id not in from_blocks:
+                from_blocks[block_id] = value
+    for key in ('blocks', 'context', 'section_context'):
+        for block in rows_by_key.get(key) or []:
+            if not isinstance(block, dict):
+                continue
+            block_id = block.get('id')
+            value = block.get('translation_hash')
+            if not block_id or block_id in found:
+                continue
+            if not (isinstance(value, str) and value.strip()) and block_id in from_blocks:
+                found[block_id] = from_blocks[block_id]
     return found
 
 
