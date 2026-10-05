@@ -46,6 +46,11 @@ def main():
     p.add_argument('--blocks', required=True)
     p.add_argument('--out')
     p=commands.add_parser('crop', parents=[common]); p.add_argument('document_id'); p.add_argument('--page',type=int,required=True); p.add_argument('--bbox',nargs=4,type=float,required=True)
+    p=commands.add_parser('structure-candidates', parents=[common])
+    p.add_argument('document_id')
+    p.add_argument('--out')
+    p.add_argument('--preview')
+    p.add_argument('--preview-pages', type=int, default=3)
     p=commands.add_parser('serve', parents=[common]); p.add_argument('--port',type=int,default=8765)
     args=parser.parse_args()
     try:
@@ -89,6 +94,42 @@ def main():
             result={'document_id':d['id'],'revision':d['revision'],'stage':d['stage'],**pending_counts(d)}
         elif args.command=='export':
             result=export_html(args.document_id,args.output)
+        elif args.command=='structure-candidates':
+            from . import store
+            data_root=Path(store.DATA).expanduser().resolve()
+            for raw in (args.out, args.preview):
+                if not raw: continue
+                resolved=Path(raw).expanduser().resolve()
+                if resolved==data_root or resolved.is_relative_to(data_root):
+                    raise ValueError('structure candidates output must not be inside the document data directory')
+            from .structure_candidates import build_payload, render_preview
+            d=read(args.document_id)
+            payload=build_payload(d)
+            if args.out:
+                path=Path(args.out)
+            else:
+                path=ROOT/'candidates'/f'{d["id"]}-structure-candidates.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+            preview_path=None
+            if args.preview:
+                preview_path=Path(args.preview)
+                preview_path.parent.mkdir(parents=True, exist_ok=True)
+                preview_path.write_text(render_preview(payload, args.preview_pages), encoding='utf-8')
+            cov=payload['coverage']
+            result={
+                'path':str(path),
+                'preview':str(preview_path) if preview_path else None,
+                'document_id':d['id'],
+                'revision':d['revision'],
+                'version':payload['version'],
+                'atoms':cov['atom_count'],
+                'candidates':cov['candidate_count'],
+                'coverage_ok':cov['coverage_ok'],
+                'orphans':len(cov['orphan_atom_ids']),
+                'hard_spot_counts':payload['hard_spot_counts'],
+                'pages':[{k:info[k] for k in ('page','mode','gutter')} for info in payload['pages']],
+            }
         else:
             d=read(args.document_id)
             if args.command=='show':

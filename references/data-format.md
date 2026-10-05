@@ -31,6 +31,10 @@
 
 `progress` 默认投影保留 validate 的 `ok`、`blocks`（仍是块数量，不是块列表）、`translated`、`reviewed`，并加上 `outline_length`、`unresolved_issues`、`pending_translate`、`pending_review`、`error_summary`、`warning_summary`、`confirmed_limitations_summary` 和上述公共字段。`errors` 只保留非重复的结构性/问题错误（例如未解决的提取问题、全文复核缺失、对齐或数字差异）。大量形如 `b00001: missing translation`、`b00001: second-pass review required` 以及其他 `missing …` 的逐块错误收进 `error_summary`：`total` 加 `by_kind`，每类有 `count`、最多 5 个 `sample_ids` 和对应 `sample_messages`。不返回块正文或 atoms。`ok` 仍只由完整 validate 的 errors 决定，不因折叠而变成 true。已知限制不在默认投影里逐条展开。`confirmed_limitations_summary` 为 `total` 加 `by_category`：每类有 `count`、最多 3 个 `sample_ids`，以及一条共用短 `summary`（该类 resolution 压缩空白后最长约 120 字，不附 `resolution_evidence`）。`warnings` 只保留非限制类原文（例如失锚笔记）再加每类一条短注（类别、条数、样例 id、同一条短 summary）。`warning_summary` 为 `total`（压缩前的 warning 条数）、`confirmed_limitations`（被折叠的逐条限制 warning 数）、`other`（其余 warning 条数）和 `by_category`（各类条数）。完整的 `confirmed_limitations`（每项 `id`、`category`、`resolution`、`resolution_evidence`）和逐条 warning 仍由 `validate`、阅读界面、离线 HTML 和 `progress --full` 返回。
 
+## 可选结构候选
+
+`structure-candidates DOC_ID [--out PATH] [--preview PATH] [--preview-pages N]` 只读 PDF atoms 的 `page` / `bbox`，输出段落候选和阅读顺序建议。默认写 `WORKSPACE/candidates/DOC_ID-structure-candidates.json`；stdout 为 `path`、`preview`、`document_id`、`revision`、`version`、`atoms`、`candidates`、`coverage_ok`、`orphans`、`hard_spot_counts`、`pages`（每页 `page` / `mode` / `gutter`）。候选文件带 `not_a_structure_submission: true`，不是 `submit` payload；不改 `document.json`、revision 或复核状态。非 PDF 文档或覆盖检查失败时 exit 1、`ok:false`。字段与已知限制见 [结构候选](structure-candidates.md)。
+
 ## 组装提交信封
 
 `assemble` 只给 Agent 写好的块列表包上**读取任务时**的 `revision` 和 `submission_id/agent/operation`。revision 和复核哈希都来自当时的 `tasks`/`show` 快照（`--task`），不取实时文档上的最新 revision，也不根据当前译文现算哈希。它不发明译文、不自动写复核意见、不跳过检查。`submit` 仍执行对齐、数字、复核说明和全文复核等原有门禁。
