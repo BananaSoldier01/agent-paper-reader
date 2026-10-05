@@ -377,3 +377,86 @@ def test_cli_rejects_out_and_preview_same_resolved_path(tmp_path, monkeypatch, c
     assert preview.is_symlink()
     assert doc_path.read_bytes() == before
     assert not (tmp_path / "candidates").exists()
+
+
+def test_cli_rejects_case_alias_out_into_data(tmp_path, monkeypatch, capsys):
+    """P1: on case-insensitive FS, DATA/... aliases data/... — must refuse before write."""
+    from reader import cli
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    monkeypatch.setattr(cli, "_fs_dir_is_case_insensitive", lambda _directory: True)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    d = import_document(path)
+    doc_path = store.folder(d["id"]) / "document.json"
+    before = doc_path.read_bytes()
+    # Alternate casing of the real data tree (string resolve() would miss this).
+    alias_out = tmp_path / "DATA" / d["id"] / "document.json"
+    message = "structure candidates output must not be inside the document data directory"
+    code, raw = _run_cli(
+        monkeypatch, capsys, "structure-candidates", d["id"], "--out", str(alias_out),
+    )
+    assert code == 1
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"] == message
+    assert doc_path.read_bytes() == before
+    assert not alias_out.exists()
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_cli_rejects_out_and_preview_case_alias_neither_exists(tmp_path, monkeypatch, capsys):
+    """P2: --out and --preview same via case when neither file exists yet."""
+    from reader import cli
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    monkeypatch.setattr(cli, "_fs_dir_is_case_insensitive", lambda _directory: True)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    d = import_document(path)
+    doc_path = store.folder(d["id"]) / "document.json"
+    before = doc_path.read_bytes()
+    out = tmp_path / "out.json"
+    preview = tmp_path / "OUT.json"
+    message = "structure candidates --out and --preview must not resolve to the same path"
+    code, raw = _run_cli(
+        monkeypatch, capsys, "structure-candidates", d["id"],
+        "--out", str(out), "--preview", str(preview),
+    )
+    assert code == 1
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"] == message
+    assert not out.exists()
+    assert not preview.exists()
+    assert doc_path.read_bytes() == before
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_cli_rejects_out_and_preview_case_alias_when_out_exists(tmp_path, monkeypatch, capsys):
+    """P2: --out exists and --preview is a case alias of the same location — refuse."""
+    from reader import cli
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    monkeypatch.setattr(cli, "_fs_dir_is_case_insensitive", lambda _directory: True)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    d = import_document(path)
+    doc_path = store.folder(d["id"]) / "document.json"
+    before = doc_path.read_bytes()
+    out = tmp_path / "report.json"
+    preview = tmp_path / "REPORT.json"
+    out.write_text("sentinel-out\n", encoding="utf-8")
+    message = "structure candidates --out and --preview must not resolve to the same path"
+    code, raw = _run_cli(
+        monkeypatch, capsys, "structure-candidates", d["id"],
+        "--out", str(out), "--preview", str(preview),
+    )
+    assert code == 1
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"] == message
+    assert out.read_text(encoding="utf-8") == "sentinel-out\n"
+    assert not preview.exists()
+    assert doc_path.read_bytes() == before
+    assert not (tmp_path / "candidates").exists()

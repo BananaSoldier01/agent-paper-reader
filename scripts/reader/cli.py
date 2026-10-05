@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from .store import read, ROOT
@@ -16,6 +17,150 @@ def _print_json(payload, pretty):
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(json.dumps(payload, ensure_ascii=False, separators=(',', ':')))
+
+
+def _fs_dir_is_case_insensitive(directory):
+    """Probe whether directory treats names case-insensitively. Always cleans up."""
+    directory = Path(directory)
+    try:
+        if not directory.is_dir():
+            return False
+    except OSError:
+        return False
+    name = f'.Apr_Case_Probe_{os.getpid()}'
+    primary = directory / name
+    alternate = directory / name.swapcase()
+    if primary == alternate:
+        return False
+    created = False
+    try:
+        primary.mkdir()
+        created = True
+        return alternate.exists()
+    except OSError:
+        return False
+    finally:
+        if created:
+            try:
+                primary.rmdir()
+            except OSError:
+                pass
+
+
+def _deepest_existing(path):
+    cur = Path(path)
+    while True:
+        try:
+            if cur.exists():
+                return cur
+        except OSError:
+            return None
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+def _fs_paths_equivalent(a, b):
+    """True if a and b name the same FS location (symlinks + case aliases)."""
+    a = Path(a).expanduser()
+    b = Path(b).expanduser()
+    try:
+        if a.exists() and b.exists():
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    try:
+        ar = a.resolve()
+        br = b.resolve()
+    except OSError:
+        return False
+    if ar == br:
+        return True
+    ae = _deepest_existing(ar)
+    be = _deepest_existing(br)
+    if ae is None or be is None:
+        return False
+    try:
+        anchors_same = os.path.samefile(ae, be)
+    except OSError:
+        anchors_same = False
+    if anchors_same:
+        try:
+            rel_a = ar.relative_to(ae)
+            rel_b = br.relative_to(be)
+        except ValueError:
+            return False
+        if rel_a == rel_b:
+            return True
+        if not _fs_dir_is_case_insensitive(ae):
+            return False
+        return rel_a.as_posix().casefold() == rel_b.as_posix().casefold()
+    # One path may already exist as a leaf while the other is only a case alias
+    # of that name (on case-insensitive FS both exist() and samefile above;
+    # here we still catch parent+casefolded-name when the probe says insensitive).
+    try:
+        if ae.is_file() and os.path.samefile(ae.parent, be):
+            rel_b = br.relative_to(be)
+            if len(rel_b.parts) == 1:
+                if ae.name == rel_b.name:
+                    return True
+                if _fs_dir_is_case_insensitive(ae.parent) and ae.name.casefold() == rel_b.name.casefold():
+                    return True
+        if be.is_file() and os.path.samefile(be.parent, ae):
+            rel_a = ar.relative_to(ae)
+            if len(rel_a.parts) == 1:
+                if be.name == rel_a.name:
+                    return True
+                if _fs_dir_is_case_insensitive(be.parent) and be.name.casefold() == rel_a.name.casefold():
+                    return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def _fs_path_is_under_root(path, root):
+    """True if path is root or inside root under actual filesystem semantics."""
+    path = Path(path).expanduser()
+    root = Path(root).expanduser()
+    try:
+        root_res = root.resolve()
+    except OSError:
+        return False
+    try:
+        resolved = path.resolve()
+        if resolved == root_res or resolved.is_relative_to(root_res):
+            return True
+    except (ValueError, OSError):
+        pass
+    cur = path
+    seen = set()
+    while True:
+        key = str(cur)
+        if key in seen:
+            break
+        seen.add(key)
+        try:
+            if cur.exists():
+                try:
+                    anchor = root_res if root_res.exists() else root
+                    if os.path.samefile(cur, anchor):
+                        return True
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    try:
+        if not root_res.exists() or not _fs_dir_is_case_insensitive(root_res):
+            return False
+        r = root_res.as_posix().casefold().rstrip('/')
+        p = path.resolve().as_posix().casefold()
+        return p == r or p.startswith(r + '/')
+    except OSError:
+        return False
+
 
 
 def main():
@@ -105,18 +250,15 @@ def main():
                 path=ROOT/'candidates'/f'{d["id"]}-structure-candidates.json'
             preview_path=Path(args.preview).expanduser() if args.preview else None
             # Resolve ALL final output paths (default + explicit) before any write.
-            # Covers file and directory symlinks into data/.
+            # FS-aware: symlinks into data/ and case aliases (DATA vs data) on
+            # case-insensitive filesystems; also out/preview same via case.
             targets=[path]
             if preview_path is not None:
                 targets.append(preview_path)
             for target in targets:
-                resolved=target.resolve()
-                if resolved==data_root or resolved.is_relative_to(data_root):
+                if _fs_path_is_under_root(target, data_root) or _fs_path_is_under_root(target.parent, data_root):
                     raise ValueError('structure candidates output must not be inside the document data directory')
-                parent=target.parent.resolve()
-                if parent==data_root or parent.is_relative_to(data_root):
-                    raise ValueError('structure candidates output must not be inside the document data directory')
-            if preview_path is not None and path.resolve()==preview_path.resolve():
+            if preview_path is not None and _fs_paths_equivalent(path, preview_path):
                 raise ValueError('structure candidates --out and --preview must not resolve to the same path')
             payload=build_payload(d)
             path.parent.mkdir(parents=True, exist_ok=True)
