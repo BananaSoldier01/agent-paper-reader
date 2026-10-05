@@ -392,6 +392,7 @@ def test_cli_rejects_case_alias_out_into_data(tmp_path, monkeypatch, capsys):
     before = doc_path.read_bytes()
     # Alternate casing of the real data tree (string resolve() would miss this).
     alias_out = tmp_path / "DATA" / d["id"] / "document.json"
+    alias_existed = alias_out.exists()
     message = "structure candidates output must not be inside the document data directory"
     code, raw = _run_cli(
         monkeypatch, capsys, "structure-candidates", d["id"], "--out", str(alias_out),
@@ -401,7 +402,11 @@ def test_cli_rejects_case_alias_out_into_data(tmp_path, monkeypatch, capsys):
     assert payload["ok"] is False
     assert payload["error"] == message
     assert doc_path.read_bytes() == before
-    assert not alias_out.exists()
+    # On a real case-insensitive FS, DATA/... already resolves to the same
+    # inode as data/...; refuse must leave existence+content unchanged.
+    assert alias_out.exists() == alias_existed
+    if alias_out.exists():
+        assert alias_out.samefile(doc_path)
     assert not (tmp_path / "candidates").exists()
 
 
@@ -447,6 +452,7 @@ def test_cli_rejects_out_and_preview_case_alias_when_out_exists(tmp_path, monkey
     out = tmp_path / "report.json"
     preview = tmp_path / "REPORT.json"
     out.write_text("sentinel-out\n", encoding="utf-8")
+    preview_existed = preview.exists()
     message = "structure candidates --out and --preview must not resolve to the same path"
     code, raw = _run_cli(
         monkeypatch, capsys, "structure-candidates", d["id"],
@@ -457,6 +463,10 @@ def test_cli_rejects_out_and_preview_case_alias_when_out_exists(tmp_path, monkey
     assert payload["ok"] is False
     assert payload["error"] == message
     assert out.read_text(encoding="utf-8") == "sentinel-out\n"
-    assert not preview.exists()
+    # On a real case-insensitive FS, REPORT.json is the same file as report.json;
+    # refuse must leave existence+content unchanged (samefile when present).
+    assert preview.exists() == preview_existed
+    if preview.exists():
+        assert preview.samefile(out)
     assert doc_path.read_bytes() == before
     assert not (tmp_path / "candidates").exists()
