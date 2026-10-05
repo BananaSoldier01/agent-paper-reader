@@ -285,3 +285,95 @@ def test_non_pdf_document_rejected(tmp_path, monkeypatch, capsys):
     assert payload["ok"] is False
     assert "page and bbox" in payload["error"]
     assert not (tmp_path / "candidates").exists()
+
+
+def test_cli_rejects_default_file_symlink_into_data(tmp_path, monkeypatch, capsys):
+    """P1: default candidates file symlink to document.json must not overwrite literature data."""
+    from reader import cli
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    d = import_document(path)
+    doc_path = store.folder(d["id"]) / "document.json"
+    before = doc_path.read_bytes()
+    cand_dir = tmp_path / "candidates"
+    cand_dir.mkdir()
+    default_out = cand_dir / f'{d["id"]}-structure-candidates.json'
+    default_out.symlink_to(doc_path)
+    message = "structure candidates output must not be inside the document data directory"
+    code, raw = _run_cli(monkeypatch, capsys, "structure-candidates", d["id"])
+    assert code == 1
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"] == message
+    assert doc_path.read_bytes() == before
+    assert default_out.is_symlink()
+    assert default_out.resolve() == doc_path.resolve()
+
+
+def test_cli_rejects_default_dir_symlink_into_data(tmp_path, monkeypatch, capsys):
+    """P1: candidates/ directory symlink into data/ must be refused before write."""
+    from reader import cli
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    d = import_document(path)
+    doc_path = store.folder(d["id"]) / "document.json"
+    before = doc_path.read_bytes()
+    before_names = sorted(p.name for p in store.folder(d["id"]).iterdir())
+    cand_dir = tmp_path / "candidates"
+    cand_dir.symlink_to(store.folder(d["id"]))
+    message = "structure candidates output must not be inside the document data directory"
+    code, raw = _run_cli(monkeypatch, capsys, "structure-candidates", d["id"])
+    assert code == 1
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"] == message
+    assert doc_path.read_bytes() == before
+    assert sorted(p.name for p in store.folder(d["id"]).iterdir()) == before_names
+    assert cand_dir.is_symlink()
+
+
+def test_cli_rejects_out_and_preview_same_resolved_path(tmp_path, monkeypatch, capsys):
+    """P2: --out and --preview resolving to the same real path must refuse before any write."""
+    from reader import cli
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    d = import_document(path)
+    doc_path = store.folder(d["id"]) / "document.json"
+    before = doc_path.read_bytes()
+    message = "structure candidates --out and --preview must not resolve to the same path"
+
+    same = tmp_path / "collision.json"
+    code, raw = _run_cli(
+        monkeypatch, capsys, "structure-candidates", d["id"],
+        "--out", str(same), "--preview", str(same),
+    )
+    assert code == 1
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"] == message
+    assert not same.exists()
+    assert not (tmp_path / "candidates").exists()
+    assert doc_path.read_bytes() == before
+
+    out = tmp_path / "out.json"
+    preview = tmp_path / "preview.md"
+    out.write_text("sentinel-out\n", encoding="utf-8")
+    preview.symlink_to(out)
+    code, raw = _run_cli(
+        monkeypatch, capsys, "structure-candidates", d["id"],
+        "--out", str(out), "--preview", str(preview),
+    )
+    assert code == 1
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"] == message
+    assert out.read_text(encoding="utf-8") == "sentinel-out\n"
+    assert preview.is_symlink()
+    assert doc_path.read_bytes() == before
+    assert not (tmp_path / "candidates").exists()

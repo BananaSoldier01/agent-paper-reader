@@ -96,24 +96,32 @@ def main():
             result=export_html(args.document_id,args.output)
         elif args.command=='structure-candidates':
             from . import store
-            data_root=Path(store.DATA).expanduser().resolve()
-            for raw in (args.out, args.preview):
-                if not raw: continue
-                resolved=Path(raw).expanduser().resolve()
-                if resolved==data_root or resolved.is_relative_to(data_root):
-                    raise ValueError('structure candidates output must not be inside the document data directory')
             from .structure_candidates import build_payload, render_preview
+            data_root=Path(store.DATA).expanduser().resolve()
             d=read(args.document_id)
-            payload=build_payload(d)
             if args.out:
-                path=Path(args.out)
+                path=Path(args.out).expanduser()
             else:
                 path=ROOT/'candidates'/f'{d["id"]}-structure-candidates.json'
+            preview_path=Path(args.preview).expanduser() if args.preview else None
+            # Resolve ALL final output paths (default + explicit) before any write.
+            # Covers file and directory symlinks into data/.
+            targets=[path]
+            if preview_path is not None:
+                targets.append(preview_path)
+            for target in targets:
+                resolved=target.resolve()
+                if resolved==data_root or resolved.is_relative_to(data_root):
+                    raise ValueError('structure candidates output must not be inside the document data directory')
+                parent=target.parent.resolve()
+                if parent==data_root or parent.is_relative_to(data_root):
+                    raise ValueError('structure candidates output must not be inside the document data directory')
+            if preview_path is not None and path.resolve()==preview_path.resolve():
+                raise ValueError('structure candidates --out and --preview must not resolve to the same path')
+            payload=build_payload(d)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
-            preview_path=None
-            if args.preview:
-                preview_path=Path(args.preview)
+            if preview_path is not None:
                 preview_path.parent.mkdir(parents=True, exist_ok=True)
                 preview_path.write_text(render_preview(payload, args.preview_pages), encoding='utf-8')
             cov=payload['coverage']

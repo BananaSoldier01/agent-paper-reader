@@ -18,6 +18,7 @@ python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>" structure
 
 - 默认把完整候选 JSON 写到 `WORKSPACE/candidates/DOC_ID-structure-candidates.json`，不写进 `data/DOC_ID/`。stdout 只给路径、atom 数、候选数、`coverage_ok`、orphan 数、`hard_spot_counts` 和每页 `mode` / `gutter`。
 - `--preview` 写一份前 N 页（默认 3）的 Markdown 预览，便于逐页抽查。
+- 写入前会 resolve 默认与显式输出路径（含文件/目录符号链接）；落在 `data/` 内、或 `--out` 与 `--preview` 解析到同一真实路径时直接拒绝，避免覆盖文献数据或用 Markdown 盖掉 JSON。
 - 非 PDF 文档（atoms 没有 `page` + `bbox`）直接报错 `ok:false`。
 - 每个 atom 必须恰好出现在一个候选里；覆盖检查失败时报错，不输出半成品。
 
