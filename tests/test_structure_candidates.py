@@ -228,6 +228,116 @@ def test_cli_is_read_only(tmp_path, monkeypatch, capsys):
     assert result["preview"] == str(preview)
 
 
+@pytest.mark.parametrize("already_imported", [False, True])
+def test_cli_pdf_import_generates_candidates_by_default(tmp_path, monkeypatch, capsys, already_imported):
+    from reader import cli
+    from reader.workflow import validate
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    path = tmp_path / "fixture.PDF"
+    make_pdf(path)
+    before = None
+    if already_imported:
+        imported = import_document(path)
+        doc_path = store.folder(imported["id"]) / "document.json"
+        before = (doc_path.read_bytes(), doc_path.stat().st_mtime_ns)
+    code, raw = _run_cli(monkeypatch, capsys, "import", str(path))
+    assert code == 0
+    envelope = json.loads(raw)
+    assert envelope["ok"] is True
+    result = envelope["result"]
+    summary = result["structure_candidates"]
+    assert summary["status"] == "ready" and summary["coverage_ok"] is True
+    assert "candidates" not in result  # stdout does not contain the full candidate list
+    doc = store.read(result["document_id"])
+    payload = json.loads(Path(summary["path"]).read_text("utf-8"))
+    ids = [a for c in payload["candidates"] for a in c["atom_ids"]]
+    assert sorted(ids) == sorted(a["id"] for a in doc["atoms"])
+    assert len(ids) == len(set(ids))
+    assert doc["stage"] == "structure" and doc["revision"] == 0
+    assert doc["structure_review"] is None and doc["full_review"] is None
+    assert doc["submissions"] == {} and not validate(doc)["ok"]
+    assert any(i["id"] == "page-3" and not i["resolution"] for i in doc["issues"])
+    assert "structure_candidates" not in doc
+    if before is not None:
+        assert (doc_path.read_bytes(), doc_path.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("failure", ["symlink", "coverage"])
+def test_cli_pdf_import_reports_candidate_failure_without_changing_document(tmp_path, monkeypatch, capsys, failure):
+    from reader import cli, structure_candidates
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    doc = import_document(path)
+    doc_path = store.folder(doc["id"]) / "document.json"
+    before = (doc_path.read_bytes(), doc_path.stat().st_mtime_ns)
+    candidate_path = tmp_path / "candidates" / f'{doc["id"]}-structure-candidates.json'
+    if failure == "symlink":
+        candidate_path.parent.mkdir()
+        candidate_path.symlink_to(doc_path)
+        message = "must not be inside the document data directory"
+    else:
+        def bad_coverage(_doc):
+            raise ValueError("structure candidate coverage failed")
+        monkeypatch.setattr(structure_candidates, "build_payload", bad_coverage)
+        message = "coverage failed"
+    code, raw = _run_cli(monkeypatch, capsys, "import", str(path))
+    assert code == 0
+    envelope = json.loads(raw)
+    assert envelope["ok"] is True
+    summary = envelope["result"]["structure_candidates"]
+    assert summary["status"] == "unavailable" and message in summary["error"]
+    assert "path" not in summary
+    assert (doc_path.read_bytes(), doc_path.stat().st_mtime_ns) == before
+    if failure == "coverage":
+        assert not candidate_path.exists()
+
+
+@pytest.mark.parametrize("suffix,text", [
+    (".md", "# Title\n\nA paragraph."),
+    (".txt", "A paragraph."),
+    (".html", "<html><body><p>A paragraph.</p></body></html>"),
+    (".tex", r"\begin{document}A paragraph.\end{document}"),
+])
+def test_cli_non_pdf_import_skips_candidates(tmp_path, monkeypatch, capsys, suffix, text):
+    from reader import cli
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    path = tmp_path / ("fixture" + suffix)
+    path.write_text(text, encoding="utf-8")
+    code, raw = _run_cli(monkeypatch, capsys, "import", str(path))
+    assert code == 0
+    result = json.loads(raw)["result"]
+    assert "structure_candidates" not in result
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_cli_pdf_reimport_after_structure_does_not_regenerate_candidates(tmp_path, monkeypatch, capsys):
+    from reader import cli
+    from reader.workflow import submit
+    monkeypatch.setattr(store, "DATA", tmp_path / "data")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    path = tmp_path / "fixture.pdf"
+    make_pdf(path)
+    doc = import_document(path)
+    submit(doc["id"], {
+        "operation": "structure", "revision": doc["revision"], "agent": "fixture",
+        "submission_id": "structure", "note": "Synthetic pages checked",
+        "blocks": [dict(b, structure_note="Synthetic pages checked") for b in doc["blocks"]],
+    })
+    doc = store.read(doc["id"])
+    assert doc["stage"] != "structure"
+    doc_path = store.folder(doc["id"]) / "document.json"
+    before = (doc_path.read_bytes(), doc_path.stat().st_mtime_ns)
+    code, raw = _run_cli(monkeypatch, capsys, "import", str(path))
+    assert code == 0
+    assert "structure_candidates" not in json.loads(raw)["result"]
+    assert not (tmp_path / "candidates").exists()
+    assert (doc_path.read_bytes(), doc_path.stat().st_mtime_ns) == before
+
+
 def test_cli_rejects_output_inside_data(tmp_path, monkeypatch, capsys):
     from reader import cli
     monkeypatch.setattr(store, "DATA", tmp_path / "data")
@@ -256,7 +366,7 @@ def test_cli_rejects_output_inside_data(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "candidates").exists()
 
 
-def test_import_unchanged_no_candidates(tmp_path, monkeypatch):
+def test_core_import_keeps_document_schema_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DATA", tmp_path / "data")
     path = tmp_path / "fixture.pdf"
     make_pdf(path)

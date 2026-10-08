@@ -163,6 +163,43 @@ def _fs_path_is_under_root(path, root):
 
 
 
+def _write_structure_candidates(doc, out=None, preview=None, preview_pages=3):
+    from . import store
+    from .structure_candidates import build_payload, render_preview
+
+    data_root=Path(store.DATA).expanduser().resolve()
+    path=Path(out).expanduser() if out else ROOT/'candidates'/f'{doc["id"]}-structure-candidates.json'
+    preview_path=Path(preview).expanduser() if preview else None
+    targets=[path]
+    if preview_path is not None:
+        targets.append(preview_path)
+    for target in targets:
+        if _fs_path_is_under_root(target, data_root) or _fs_path_is_under_root(target.parent, data_root):
+            raise ValueError('structure candidates output must not be inside the document data directory')
+    if preview_path is not None and _fs_paths_equivalent(path, preview_path):
+        raise ValueError('structure candidates --out and --preview must not resolve to the same path')
+    payload=build_payload(doc)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+    if preview_path is not None:
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        preview_path.write_text(render_preview(payload, preview_pages), encoding='utf-8')
+    cov=payload['coverage']
+    return {
+        'path':str(path),
+        'preview':str(preview_path) if preview_path else None,
+        'document_id':doc['id'],
+        'revision':doc['revision'],
+        'version':payload['version'],
+        'atoms':cov['atom_count'],
+        'candidates':cov['candidate_count'],
+        'coverage_ok':cov['coverage_ok'],
+        'orphans':len(cov['orphan_atom_ids']),
+        'hard_spot_counts':payload['hard_spot_counts'],
+        'pages':[{k:info[k] for k in ('page','mode','gutter')} for info in payload['pages']],
+    }
+
+
 def main():
     parser=argparse.ArgumentParser(description='Local Agent Paper Reader JSON CLI')
     common=argparse.ArgumentParser(add_help=False)
@@ -209,6 +246,11 @@ def main():
         elif args.command=='import':
             d=import_document(args.path)
             result={'document_id':d['id'],'revision':d['revision'],'stage':d['stage'],'blocks':len(d['blocks'])}
+            if Path(d['source_file']).suffix.lower()=='.pdf' and d['stage']=='structure':
+                try:
+                    result['structure_candidates']={'status':'ready', **_write_structure_candidates(d)}
+                except (ValueError, OSError) as exc:
+                    result['structure_candidates']={'status':'unavailable','error':str(exc)}
         elif args.command=='assemble':
             d=read(args.document_id)
             blocks=json.loads(Path(args.blocks).read_text('utf-8'))
@@ -240,46 +282,8 @@ def main():
         elif args.command=='export':
             result=export_html(args.document_id,args.output)
         elif args.command=='structure-candidates':
-            from . import store
-            from .structure_candidates import build_payload, render_preview
-            data_root=Path(store.DATA).expanduser().resolve()
             d=read(args.document_id)
-            if args.out:
-                path=Path(args.out).expanduser()
-            else:
-                path=ROOT/'candidates'/f'{d["id"]}-structure-candidates.json'
-            preview_path=Path(args.preview).expanduser() if args.preview else None
-            # Resolve ALL final output paths (default + explicit) before any write.
-            # FS-aware: symlinks into data/ and case aliases (DATA vs data) on
-            # case-insensitive filesystems; also out/preview same via case.
-            targets=[path]
-            if preview_path is not None:
-                targets.append(preview_path)
-            for target in targets:
-                if _fs_path_is_under_root(target, data_root) or _fs_path_is_under_root(target.parent, data_root):
-                    raise ValueError('structure candidates output must not be inside the document data directory')
-            if preview_path is not None and _fs_paths_equivalent(path, preview_path):
-                raise ValueError('structure candidates --out and --preview must not resolve to the same path')
-            payload=build_payload(d)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
-            if preview_path is not None:
-                preview_path.parent.mkdir(parents=True, exist_ok=True)
-                preview_path.write_text(render_preview(payload, args.preview_pages), encoding='utf-8')
-            cov=payload['coverage']
-            result={
-                'path':str(path),
-                'preview':str(preview_path) if preview_path else None,
-                'document_id':d['id'],
-                'revision':d['revision'],
-                'version':payload['version'],
-                'atoms':cov['atom_count'],
-                'candidates':cov['candidate_count'],
-                'coverage_ok':cov['coverage_ok'],
-                'orphans':len(cov['orphan_atom_ids']),
-                'hard_spot_counts':payload['hard_spot_counts'],
-                'pages':[{k:info[k] for k in ('page','mode','gutter')} for info in payload['pages']],
-            }
+            result=_write_structure_candidates(d, args.out, args.preview, args.preview_pages)
         else:
             d=read(args.document_id)
             if args.command=='show':

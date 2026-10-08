@@ -719,16 +719,6 @@ def _assign_asset(doc_id, block, asset):
     block['asset'] = asset
 
 
-def _apply_optional_asset(doc_id, block, asset):
-    # Full-block and update payloads repeat asset: null for text. That is not an assignment
-    # and must not clear a file that is already there.
-    if not asset:
-        if block.get('asset'):
-            raise ValueError('Unknown local asset')
-        return
-    _assign_asset(doc_id, block, asset)
-
-
 def _source_text(doc, source_ids):
     return ' '.join(atom['text'] for sid in source_ids for atom in doc['atoms'] if atom['id'] == sid)
 
@@ -750,16 +740,55 @@ def _commit_structure(doc, blocks, payload):
     doc['structure_review'] = {'agent': payload['agent'], 'note': payload['note']}
 
 
+def _resolve_structure_assets(doc, doc_id, blocks, explicit):
+    # Block ids can be reused for entirely different source atoms. Follow source
+    # provenance instead; page placeholders belong to doc.pages, not body figures.
+    source_sets = {b['id']: set(b['source_ids']) for b in blocks}
+    if len(source_sets) != len(blocks):
+        raise ValueError('Duplicate block ids')
+    images = [(set(b['source_ids']), b['asset']) for b in doc['blocks']
+              if b.get('asset') and b['kind'] != 'page']
+    pages = [(set(b['source_ids']), b['asset']) for b in doc['blocks']
+             if b.get('asset') and b['kind'] == 'page']
+
+    original_names = {asset for _, asset in images}
+    for old_sources, old_asset in images:
+        if not any(old_sources <= new_sources for new_sources in source_sets.values()):
+            affected = [bid for bid, new_sources in source_sets.items() if old_sources & new_sources]
+            if not any(isinstance(explicit.get(bid), str) and explicit[bid] and
+                       (explicit[bid] == old_asset or explicit[bid] not in original_names)
+                       for bid in affected):
+                raise ValueError('Split source image asset requires explicit non-empty asset placement')
+
+    for block in blocks:
+        new_sources = source_sets[block['id']]
+        inherited = {asset for old_sources, asset in images if old_sources <= new_sources}
+        if block['kind'] == 'page':
+            inherited.update(asset for old_sources, asset in pages if old_sources == new_sources)
+        if block['id'] in explicit:
+            if explicit[block['id']]:
+                _assign_asset(doc_id, block, explicit[block['id']])
+            elif inherited or any(old_sources & new_sources for old_sources, _ in images):
+                raise ValueError('Empty asset cannot clear an associated source image')
+            else:
+                block['asset'] = None
+        elif len(inherited) > 1:
+            raise ValueError('Multiple source image assets require an explicit non-empty asset')
+        else:
+            block['asset'] = next(iter(inherited), None)
+
+
 def _structure_replace(doc, doc_id, payload):
     old = {b['id']: b for b in doc['blocks']}
     blocks = []
+    explicit_assets = {}
     for item in payload['blocks']:
         if item['kind'] not in KINDS:
             raise ValueError('Unknown content kind')
         block = dict(old.get(item['id'], {'translation': None, 'history': [], 'review': None, 'user_edited': False, 'asset': None}))
         block.update({k: item[k] for k in ('id', 'kind', 'text', 'source_ids', 'structure_note')})
         if 'asset' in item:
-            _apply_optional_asset(doc_id, block, item['asset'])
+            explicit_assets[item['id']] = item['asset']
         if not block['source_ids'] or not block['structure_note'].strip():
             raise ValueError('Each structural decision requires source ids and a reason')
         if block['kind'] not in VERBATIM:
@@ -767,24 +796,8 @@ def _structure_replace(doc, doc_id, payload):
                 raise ValueError('Changed source text requires explicit source_change explanation')
             block['source_change'] = item.get('source_change', '')
         blocks.append(block)
+    _resolve_structure_assets(doc, doc_id, blocks, explicit_assets)
     _commit_structure(doc, blocks, payload)
-
-
-def _merge_assets(doc_id, into, sources, merge):
-    # Refuse silent figure loss: multiple distinct assets need an explicit merged asset.
-    assets = []
-    for block in [into, *sources]:
-        asset = block.get('asset')
-        if asset and asset not in assets:
-            assets.append(asset)
-    if 'asset' in merge:
-        # The key alone is not an explicit choice. null, "", and false are rejected.
-        _assign_asset(doc_id, into, merge['asset'])
-        return
-    if len(assets) > 1:
-        raise ValueError('Merge would discard figure assets; provide explicit asset for the merged block')
-    if len(assets) == 1:
-        into['asset'] = assets[0]
 
 
 def _structure_keep(doc, doc_id, payload):
@@ -793,6 +806,7 @@ def _structure_keep(doc, doc_id, payload):
     by_id = {block['id']: block for block in blocks}
     updates = payload.get('updates') or []
     merges = payload.get('merges') or []
+    explicit_assets = {}
     if not isinstance(updates, list) or not isinstance(merges, list):
         raise ValueError('updates and merges must be lists')
     for item in updates:
@@ -818,7 +832,9 @@ def _structure_keep(doc, doc_id, payload):
             # Incremental text/source edits need a fresh reason; do not reuse a stale one.
             block['source_change'] = ''
         if 'asset' in item:
-            _apply_optional_asset(doc_id, block, item['asset'])
+            if item['asset']:
+                _assign_asset(doc_id, block, item['asset'])
+            explicit_assets[block['id']] = item['asset']
     for merge in merges:
         into = by_id.get(merge.get('into'))
         if not into:
@@ -837,7 +853,33 @@ def _structure_keep(doc, doc_id, payload):
                 raise ValueError(f"Unknown block {fid}")
             sources.append(src)
             gained.extend(src['source_ids'])
-        _merge_assets(doc_id, into, sources, merge)
+        merged_sources = set(into['source_ids']) | set(gained)
+        participants = [into, *sources]
+        old_assets = set()
+        for old in doc['blocks']:
+            if not old.get('asset') or old['kind'] == 'page':
+                continue
+            old_sources = set(old['source_ids'])
+            if old_sources <= merged_sources:
+                # A crop update replaces this old image only when its updated
+                # block still contains the image's entire source set.
+                replacements = {explicit_assets[b['id']] for b in participants
+                                if explicit_assets.get(b['id'])
+                                and old_sources <= set(b['source_ids'])}
+                old_assets.update(replacements or {old['asset']})
+        staged_assets = {explicit_assets[b['id']] for b in participants
+                         if explicit_assets.get(b['id'])}
+        if 'asset' in merge:
+            # The key alone is not an explicit choice; null/empty is rejected.
+            _assign_asset(doc_id, into, merge['asset'])
+            explicit_assets[into['id']] = merge['asset']
+        elif len(old_assets | staged_assets) > 1:
+            raise ValueError('Merge would discard figure assets; provide explicit asset for the merged block')
+        elif staged_assets:
+            # An explicitly attached source image follows a merged source atom.
+            explicit_assets[into['id']] = next(iter(staged_assets))
+        for fid in from_ids:
+            explicit_assets.pop(fid, None)
         into['source_ids'] = list(into['source_ids']) + gained
         if 'text' in merge:
             into['text'] = merge['text']
@@ -869,6 +911,7 @@ def _structure_keep(doc, doc_id, payload):
     sources = [sid for block in blocks for sid in block['source_ids']]
     if set(sources) != {atom['id'] for atom in doc['atoms']} or len(sources) != len(set(sources)):
         raise ValueError('Structure must account for every source atom exactly once (including excluded items)')
+    _resolve_structure_assets(doc, doc_id, blocks, explicit_assets)
     for block in blocks:
         _require_source_change(doc, block)
     _commit_structure(doc, blocks, payload)

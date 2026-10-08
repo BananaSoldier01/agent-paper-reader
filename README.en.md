@@ -25,7 +25,7 @@ All six formats use the same structure, translation, semantic alignment, second 
 
 | Original document | File type | Scope and limits |
 | --- | --- | --- |
-| Text-based PDF | `.pdf` | Extracts text and keeps page images for verification; scanned pages are not OCRed. |
+| Text-based PDF | `.pdf` | Generates paragraph and reading-order suggestions by default for the Agent to verify against original pages; scanned pages are not OCRed. |
 | Markdown | `.md` / `.markdown` | UTF-8 text with headings, lists, tables, and code; provide local images alongside the document. |
 | Plain text | `.txt` | UTF-8 text, with blank lines separating candidate paragraphs. |
 | Local web archive | `.html` / `.htm` | Parses text structure and copies relative images from the document's directory; does not fetch URLs or remote images. The Agent checks navigation and footer content during structure review. |
@@ -33,6 +33,12 @@ All six formats use the same structure, translation, semantic alignment, second 
 | Single-file LaTeX | `.tex` | Main-file text, headings, equations, and code; no `\input` / `\include` expansion, compilation, or external `.bib` / `.bbl` loading. Missing `\includegraphics` images remain issues requiring verification and completion. |
 
 Save web articles as local files before giving them to the Agent. This version does not run OCR or accept EPUB or other language directions. Extracted content still requires source-based structure review and translation review by the Agent.
+
+## PDF structure assistance by default
+
+Scripts use page positions, columns, and line spacing to suggest paragraph groups and reading order, and flag difficult areas such as footnotes and equation fragments. The Agent checks and corrects these suggestions against the original pages before translation and review. Users do not need to understand structure candidates, run an extra command, or choose whether to enable them.
+
+The assistance ships with the Skill and needs no extra deployment or model API. Suggestions still require verification, and the existing source-coverage checks and complete review workflow remain in place.
 
 ## See it in action
 
@@ -87,7 +93,7 @@ https://github.com/BananaSoldier01/agent-paper-reader
 
 Read the repository README and SKILL.md first, then install the complete
 Skill from the current main branch using a method supported by this Agent.
-Use the v0.4.0 slim install zip or main source for multiple input formats, smaller task payloads, and the complete review workflow; do not install the PDF/Markdown-only v0.1.0 package.
+Use the v0.5.0 slim install zip or current main source for multiple input formats, default PDF structure assistance, smaller task payloads, and the complete review workflow; older install packages may lack these features.
 Confirm the appropriate installation directory and check prerequisites,
 including Python 3.12+. Preserve existing configuration and document data.
 When finished, tell me where it is installed, whether it is ready to use,
@@ -119,7 +125,7 @@ Missing dependencies, failed conversion, or unreliable output leave the original
 
 For the multiple input formats listed here, download the [main source ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip), extract it, and place the complete source directory in your Agent's Skill directory under the name `agent-paper-reader`.
 
-The [v0.4.0 slim install zip](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.4.0/agent-paper-reader.zip) includes six input formats, incremental structure updates, section paging, and the search-position fix, plus deduplicated task projections, semantic-group offset calculation, snapshot-bound submissions, and visible known limitations. The default task batch is 16; block review, whole-document review, and validation requirements remain in place. Actual runtime depends on the document and host; no fixed speedup is guaranteed. The [v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) zip remains PDF/Markdown only.
+The [v0.5.0 slim install zip](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip) adds default PDF structure assistance and fixes image provenance during structural changes. It retains six input formats, incremental structure updates, section paging, deduplicated task projections, semantic-group offset calculation, snapshot-bound submissions, and visible known limitations. The default task batch is 16; block review, whole-document review, and validation requirements remain in place. Existing users should update the Skill program directory while preserving their external document workspace. The [v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) zip remains PDF/Markdown only.
 
 This repository is also a complete Skill, with [SKILL.md](SKILL.md) as its entry point. You can install the full repository contents; **do not copy only SKILL.md**. For a project supporting `.agents/skills`:
 

@@ -40,3 +40,50 @@ def test_two_column_and_scan_detection(tmp_path,monkeypatch):
     assert [b['text'] for b in d['blocks'][:4]]==leading
     assert any(len(b['source_ids'])==2 for b in d['blocks'])
     assert any('Unresolved' in e for e in validate(d)['errors'])
+
+
+def test_full_structure_reused_page_id_does_not_attach_wrong_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DATA', tmp_path / 'data')
+    path = tmp_path / 'page-alias.pdf'
+    make_pdf(path)
+    imported = import_document(path)
+    page = next(b for b in imported['blocks'] if b['kind'] == 'page' and b['asset'] == 'page-1.png')
+    body = next(b for b in imported['blocks'] if b['text'] == 'and continues on page two.')
+    rows = [
+        {k: b[k] for k in ('id', 'kind', 'text', 'source_ids')}
+        | {'structure_note': 'Synthetic PDF page and text checked'}
+        for b in imported['blocks']
+    ]
+    by_id = {b['id']: b for b in rows}
+    by_id[page['id']].update(kind='paragraph', text=body['text'], source_ids=body['source_ids'])
+    by_id[body['id']].update(id='b99999', kind='excluded', text='', source_ids=page['source_ids'])
+    saved = submit(imported['id'], {
+        'revision': 0, 'submission_id': 'page-id-alias', 'operation': 'structure',
+        'agent': 'fixture', 'note': 'Page provenance checked', 'blocks': rows,
+    })
+    aliased = next(b for b in saved['blocks'] if b['id'] == page['id'])
+    assert aliased['source_ids'] == body['source_ids']
+    assert aliased.get('asset') is None
+    assert next(b for b in saved['blocks'] if b['id'] == 'b99999').get('asset') is None
+    assert saved['pages'][0]['asset'] == 'page-1.png'
+
+
+def test_full_structure_same_page_placeholder_keeps_page_image(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DATA', tmp_path / 'data')
+    path = tmp_path / 'same-page.pdf'
+    make_pdf(path)
+    imported = import_document(path)
+    rows = [
+        {k: b[k] for k in ('id', 'kind', 'text', 'source_ids')}
+        | {'structure_note': 'Synthetic PDF source checked'}
+        for b in imported['blocks']
+    ]
+    saved = submit(imported['id'], {
+        'revision': 0, 'submission_id': 'same-page-placeholder', 'operation': 'structure',
+        'agent': 'fixture', 'note': 'Same source checked', 'blocks': rows,
+    })
+    for old in (b for b in imported['blocks'] if b['kind'] == 'page'):
+        kept = next(b for b in saved['blocks'] if b['id'] == old['id'])
+        assert kept['source_ids'] == old['source_ids']
+        assert kept['asset'] == old['asset']
+    assert [p['asset'] for p in saved['pages']] == [p['asset'] for p in imported['pages']]

@@ -1,6 +1,8 @@
-# 可选：PDF 结构候选
+# PDF 结构辅助
 
-`structure-candidates` 是独立的可选入口。它只读已导入 PDF 的 atoms（`page` + `bbox`），按坐标、栏位和行间空隙给出段落候选与阅读顺序建议。默认 `import` → `show` → `submit structure` 流程不变；不运行它也能完整处理文献。
+PDF 结构辅助默认由 Agent 使用，用户只需提供文献。CLI `import` 在 PDF 尚处于结构阶段时自动生成候选，并在 `structure_candidates` 中返回 `status: ready`、路径和覆盖摘要。程序只读已导入 PDF 的 atoms（`page` + `bbox`），按坐标、栏位和行间空隙给出段落候选与阅读顺序建议；Agent 按页核对后提交结构。它不新增依赖，不启动服务，也不调用模型。
+
+候选生成失败时，导入仍成功，`structure_candidates` 返回 `status: unavailable` 和错误。Agent 改用原页整理并记录具体限制，无需用户选择内部处理方式。结构已确认的文献重导入不再生成候选。非 PDF 使用原有提取结果。底层 `import_document` 与文档数据格式保持不变；文献库上传或旧工作区仍由 Agent 在结构阶段调用下方命令补生成候选。
 
 ## 不做什么
 
@@ -10,12 +12,13 @@
 
 Agent 仍须按页对照原页图确认，再用原来的 `submit` 提交 `structure`（完整 `blocks` 或 `keep_extracted` + `updates` / `merges`）。候选只是起点，不能当成已核对的结构。
 
-## 调用
+## Agent 重新生成与预览
 
 ```sh
 python "<SKILL_DIR>/scripts/paper_reader.py" --workspace "<WORKSPACE>" structure-candidates DOC_ID [--out PATH] [--preview PATH] [--preview-pages 3]
 ```
 
+- 此入口供 Agent 继续旧工作区、重新生成或抽查候选，不是用户必做的设置步骤。
 - 默认把完整候选 JSON 写到 `WORKSPACE/candidates/DOC_ID-structure-candidates.json`，不写进 `data/DOC_ID/`。stdout 只给路径、atom 数、候选数、`coverage_ok`、orphan 数、`hard_spot_counts` 和每页 `mode` / `gutter`。
 - `--preview` 写一份前 N 页（默认 3）的 Markdown 预览，便于逐页抽查。
 - 写入前会 resolve 默认与显式输出路径（含文件/目录符号链接）；落在 `data/` 内、或 `--out` 与 `--preview` 解析到同一真实路径时直接拒绝，避免覆盖文献数据或用 Markdown 盖掉 JSON。
