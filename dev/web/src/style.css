@@ -18,6 +18,26 @@ html,body,#root{width:100%;min-height:100%;margin:0}
 .paper .heading[data-level="2"] .text{font-size:1.22em;line-height:1.5}
 .paper .heading[data-level="3"] .text{font-size:1.08em;line-height:1.5}
 .paper .caption{padding-top:4px;padding-bottom:14px}
+.paper .metadata,.paper .footnote{padding-top:5px;padding-bottom:5px}
+.paper .metadata .text{font-size:max(13px,.88em);line-height:1.65}
+.paper .footnote .text{font-size:max(13px,.82em);line-height:1.6;color:#586b61}
+.paper .reference{padding-top:5px;padding-bottom:5px}
+.paper .reference .text{font-size:max(13px,.88em);line-height:1.65}
+.table-image-layout{display:grid;grid-template-columns:minmax(0,2.2fr) minmax(240px,1fr);gap:24px;align-items:start}
+.table-image-layout.single{grid-template-columns:minmax(0,1fr)}
+.table-image-layout>.figure{display:block;width:100%;height:auto;max-height:none}
+.table-glossary .pair-row{grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:12px;padding:5px 0;border-bottom:1px solid #edf0eb;line-height:1.55}
+.table-glossary .text{font-family:inherit;font-size:.88em}
+.table-glossary .source{font-family:Georgia,"Times New Roman",serif}
+.label-fragment{display:inline}
+.label-fragment+.label-fragment:before{content:' '}
+.table-scroll{min-width:0;overflow-x:auto;font-size:.9em;line-height:1.55}
+.table-scroll table{border-collapse:collapse;width:100%;text-align:left}
+.table-scroll th,.table-scroll td{border:1px solid #dfe6e0;padding:9px 11px;min-width:80px;max-width:260px;vertical-align:top;overflow-wrap:break-word}
+.table-scroll th{background:#f3f6f1;font-weight:600}
+.table-scroll .sentence{white-space:pre-wrap}
+@media(max-width:1000px){.table-image-layout{grid-template-columns:minmax(0,1.8fr) minmax(210px,1fr);gap:18px}}
+@media(max-width:700px){.table-image-layout{grid-template-columns:minmax(0,1fr)}.table-image-layout .table-glossary .pair-row{grid-template-columns:minmax(0,1fr) minmax(0,1.2fr)}.table-glossary .target{border:0;padding:0}}
 .paper article.figure{max-height:none;margin:12px 0 0}
 .paper .figure img{display:block;margin:auto}
 nav button[data-level="3"]{padding-left:22px;font-size:12px}

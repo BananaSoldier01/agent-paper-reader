@@ -2,13 +2,44 @@ import copy
 import re
 from collections import Counter
 from .store import mutate, digest, folder
+from .regions import crop_coverage_error
 
-KINDS = {'paragraph','heading','caption','figure','table','formula','reference','code','page','excluded','unclassified'}
+KINDS = {'paragraph','metadata','footnote','heading','caption','figure','table','formula','reference','code','page','excluded','unclassified'}
 VERBATIM = {'figure','formula','code','page','excluded'}
 
 
+def needs_translation(block):
+    # References retain their bibliographic source by default. Existing/explicit
+    # translations still pass the same alignment and review gates as before.
+    return block['kind'] not in VERBATIM and (
+        block['kind'] != 'reference' or block.get('translation') is not None)
+
+
 def fingerprint(doc):
-    return digest({'blocks':[{k:b.get(k) for k in ('id','text','source_ids','translation','review','kind')} for b in doc['blocks']], 'terms':doc['terms'], 'issues':doc['issues']})
+    return digest({'blocks':[{**{k:b.get(k) for k in ('id','text','source_ids','translation','review','kind')},
+                             **({'table_mode':b['table_mode']} if 'table_mode' in b else {})}
+                            for b in doc['blocks']], 'terms':doc['terms'], 'issues':doc['issues']})
+
+
+def visual_content_error(doc, block):
+    mode = block.get('table_mode')
+    if mode is not None:
+        if block.get('kind') != 'table' or mode not in ('text', 'image'):
+            return f'{block["id"]}: table_mode must be text/image on a table block'
+        if mode == 'image':
+            asset = block.get('asset')
+            if (not isinstance(asset, str) or not asset or '/' in asset or '\\' in asset or
+                    not (folder(doc['id']) / asset).is_file() or
+                    (folder(doc['id']) / asset).stat().st_size == 0):
+                return f'{block["id"]}: image table needs a non-empty verified source image'
+            if not (block.get('text') or '').strip():
+                return f'{block["id"]}: image table needs source labels for translation'
+    if block.get('kind') == 'formula' and not block.get('asset'):
+        text = block.get('text') or ''
+        math = re.search(r'(?<!\\)\$\$([\s\S]+?)\$\$|(?<![\\$])\$([^\n$]+?)\$(?!\$)', text)
+        if not math or not any(value and value.strip() for value in math.groups()):
+            return f'{block["id"]}: formula needs $...$ or $$...$$ math formatting, or a verified source image'
+    return crop_coverage_error(doc, block)
 
 
 def spans_valid(text, spans):
@@ -25,6 +56,11 @@ def spans_valid(text, spans):
 def check_translation(block, translation):
     if not isinstance(translation, dict) or not isinstance(translation.get('text'),str) or not translation['text'].strip():
         raise ValueError('Translation text required')
+    if block.get('kind') == 'table':
+        source_rows = [line for line in block['text'].splitlines() if '|' in line or '\t' in line]
+        target_lines = [line for line in translation['text'].splitlines() if line.strip()]
+        if len(source_rows) > 1 and len(target_lines) < 2:
+            raise ValueError(f'{block["id"]}: table row boundaries lost; keep translated rows on separate lines')
     pairs = translation.get('pairs', [])
     if not pairs or len({p['id'] for p in pairs}) != len(pairs):
         raise ValueError('Unique semantic alignment groups required')
@@ -217,9 +253,15 @@ def validate(doc):
         )
     translated_texts = Counter(b['translation']['text'].strip() for b in doc['blocks'] if b.get('translation'))
     for b in doc['blocks']:
-        if b['kind'] in VERBATIM:
+        visual_error = visual_content_error(doc, b)
+        if visual_error:
+            errors.append(visual_error)
+        if b['kind'] == 'reference' and not (b.get('text') or '').strip():
+            errors.append(f"{b['id']}: preserved reference text cannot be empty")
+        if not needs_translation(b):
             if not b.get('structure_note'):
-                errors.append(f"{b['id']}: visual/verbatim/excluded content needs disposition reason")
+                reason = 'reference content needs source-check reason' if b['kind'] == 'reference' else 'visual/verbatim/excluded content needs disposition reason'
+                errors.append(f"{b['id']}: {reason}")
             continue
         if not b.get('translation'):
             errors.append(f"{b['id']}: missing translation")
@@ -258,10 +300,10 @@ def note_status(doc,note):
 
 def _stage_and_pending(doc):
     stage = 'structure' if not doc['structure_review'] else 'terms' if not doc.get('terms_review') and not doc['terms'] else 'translate'
-    pending = [b for b in doc['blocks'] if b['kind'] not in VERBATIM and not b['translation']]
+    pending = [b for b in doc['blocks'] if needs_translation(b) and not b['translation']]
     if stage not in ('structure','terms') and not pending:
         stage = 'review'
-        pending = [b for b in doc['blocks'] if b['kind'] not in VERBATIM and (not b['review'] or b['review']['translation_hash']!=digest(b['translation']))]
+        pending = [b for b in doc['blocks'] if needs_translation(b) and (not b['review'] or b['review']['translation_hash']!=digest(b['translation']))]
         if not pending:
             stage = 'full_review' if not validate(doc)['ok'] else 'complete'
     return stage, pending
@@ -272,7 +314,7 @@ def pending_counts(doc):
     # Untranslated blocks are not also counted as pending review.
     translate = review = 0
     for block in doc['blocks']:
-        if block['kind'] in VERBATIM:
+        if not needs_translation(block):
             continue
         if not block.get('translation'):
             translate += 1
@@ -475,6 +517,8 @@ def _block_summary(block, width=160):
 def _public_block(block):
     # Default translate/review/terms projection. History and the long structure_note stay on disk and in --full.
     shown = {key: block.get(key) for key in ('id', 'kind', 'text', 'source_ids', 'asset', 'translation', 'review', 'user_edited')}
+    if block.get('table_mode') is not None:
+        shown['table_mode'] = block['table_mode']
     shown['translation_hash'] = digest(block['translation']) if block.get('translation') else None
     shown['has_structure_note'] = bool(str(block.get('structure_note') or '').strip())
     return shown
@@ -736,6 +780,12 @@ def _commit_structure(doc, blocks, payload):
         raise ValueError('Structure must account for every source atom exactly once (including excluded items)')
     if len({block['id'] for block in blocks}) != len(blocks):
         raise ValueError('Duplicate block ids')
+    for block in blocks:
+        if block['kind'] == 'reference' and not (block.get('text') or '').strip():
+            raise ValueError(f"{block['id']}: preserved reference text cannot be empty")
+        error = visual_content_error(doc, block)
+        if error:
+            raise ValueError(error)
     doc['blocks'] = blocks
     doc['structure_review'] = {'agent': payload['agent'], 'note': payload['note']}
 
@@ -787,6 +837,8 @@ def _structure_replace(doc, doc_id, payload):
             raise ValueError('Unknown content kind')
         block = dict(old.get(item['id'], {'translation': None, 'history': [], 'review': None, 'user_edited': False, 'asset': None}))
         block.update({k: item[k] for k in ('id', 'kind', 'text', 'source_ids', 'structure_note')})
+        if 'table_mode' in item:
+            block['table_mode'] = item['table_mode']
         if 'asset' in item:
             explicit_assets[item['id']] = item['asset']
         if not block['source_ids'] or not block['structure_note'].strip():
@@ -817,6 +869,8 @@ def _structure_keep(doc, doc_id, payload):
             if item['kind'] not in KINDS:
                 raise ValueError('Unknown content kind')
             block['kind'] = item['kind']
+        if 'table_mode' in item:
+            block['table_mode'] = item['table_mode']
         touched_source = False
         if 'text' in item:
             block['text'] = item['text']
@@ -887,6 +941,8 @@ def _structure_keep(doc, doc_id, payload):
             if merge['kind'] not in KINDS:
                 raise ValueError('Unknown content kind')
             into['kind'] = merge['kind']
+        if 'table_mode' in merge:
+            into['table_mode'] = merge['table_mode']
         if 'source_change' in merge:
             into['source_change'] = merge['source_change']
         else:

@@ -5,7 +5,7 @@
 - `atoms`：不可变的提取来源，`id/text/location`。PDF location 为 1 起算 `page` 和左上坐标系 `bbox: [x0,top,x1,bottom]`，单位 PDF point；Markdown / 纯文本 / HTML / TeX 为码点 `start/end` 和 1 起算 `line_start/line_end`（HTML/TeX 尽量映射回原文件；找不到片段时退化为顺序锚点）。DOCX location 为虚拟纯文本拼接视图上的码点 `start/end`，另含 1 起算 `paragraph_index`（按正文段落/表格顺序）。
 - `blocks`：稳定 `id`、`kind`、整理后的 `text`、`source_ids`、`structure_note`、可选 `source_change`、`asset`。正文等文本块引用完整来源；图表保留原图，页眉用 `excluded` 明示原因。允许跨页来源。atom 精度为提取行/片段，定位可逐片段切换。Word.Picture.8 的 EMF 预览另存 `image-<block>.emf`、`image-<block>.conversion.json`（回放记录，不含本机绝对路径）；只有保真检查通过时 `asset` 才指向同名 PNG，并另存 SVG。
 - 结构提交时，图片归属跟随原图片块的 `source_ids`，不按旧 `id` 猜测。完整来源被一个新块接收时，即使块改名或来源顺序变化，单张图可自动保留；无图来源不会因为复用旧 `id` 而继承图片。合并时若仍有多张不同的有效图片，必须显式指定文档目录中已存在的非空 `asset`；若各旧图完整来源已通过 `updates` 显式换成同一新裁图，后续合并可沿用它。只覆盖旧图部分来源的新裁图不代表整张旧图已被替换。若旧图片来源被拆到多个新块，程序不能唯一判断放在哪个块，必须在相关新块显式指定原图或新裁图；`null`、空字符串和 `false` 不能清掉仍关联来源的图片。PDF 导入的 `page-N.png` 是原页占位图，普通正文不会自动继承它；原页定位仍由 `pages` 保留。
-- kind：`paragraph/heading/caption/figure/table/formula/reference/code/page/excluded/unclassified`。
+- kind：`paragraph/metadata/footnote/heading/caption/figure/table/formula/reference/code/page/excluded/unclassified`。
 - `translation`：`text` 和 `pairs`。每个 pair 包含 `id/source/target`，后两项为 `[start,end]` 数组的数组，左闭右开、Unicode 码点偏移。一个语义组可跨多个句子或非连续片段。偏移不能重叠、越界或漏掉非空白字符。
 - `history`：前译文和编辑者类别；`user_edited` 后 Agent 重译被拒绝。用户每次改一个语义组的一个目标片段，其他偏移确定性调整。
 - `review`：`translation_hash/agent/note/difference_explanation`，绑定当前译文；`full_review` 绑定正文、术语、问题的 fingerprint。用户修订会使旧复核失效。
@@ -28,9 +28,42 @@
 
 结构阶段的 `show` 另含 `outline`（heading 的 id + 至多约 160 码点文本）、`issue_summary` 和全部块的摘要。块摘要只有 `id`、`kind`、截断后的 `text`、`has_structure_note`、`source_count`，没有 translation、history 或 atoms。`issue_summary` 按 issue id 前缀（去掉末尾的 `-数字` 或 `-a/-b` 加数字；若 issue 自带 `type` 则用 type）统计 `unresolved` / `resolved`，并给每类最多 3 个样例 id，不含问题正文。结构阶段的 `tasks` 使用同一摘要：`blocks` 的待办数量由 `--limit` 限制（默认 16）。结构阶段的 `show` 仍列出全部块摘要。`context` 按待办块的邻接范围返回，`section_context` 按章节窗口返回（默认最多约 24 块，可用 `--section-limit` / `--section-offset` 分段读取），并保留 `terms`。
 
-翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。默认投影的每个块只含 `id`、`kind`、`text`、`source_ids`、`asset`、`translation`、`translation_hash`、`review`、`user_edited`、`has_structure_note`，不含 `history`、长 `structure_note` 或 `source_change`；不附带整份 atoms。本批 `blocks` 仍是完整投影；`context` 与 `section_context` 里若某块 id 已出现在本批 `blocks`，该处只放引用壳 `{"id":...,"ref":true}`，不含 text / translation / translation_hash 等大字段。未进入本批的邻居或章节块仍是完整投影。`--full` 不去重，仍返回原始块。`issue_summary` 只统计未解决项。默认 `--limit` 为 16，只限制本批待办数量。默认投影的 `section_context` 有长度上限（默认 24 块），并附带 `section_window`（`section_total` / `section_offset` / `section_limit` / `truncated` 等）便于分段读取；CLI 可用 `--section-limit` / `--section-offset` 翻页。要整节、history 或全篇时用 `--full`，或加大 `--section-limit`。要核对全篇译文哈希时用 `show --full`。
+翻译、术语和复核阶段的 `show` 与 `tasks` 保持原任务窗口：`terms`、`outline`、`section_context`、相邻 `context` 和本批 `blocks`。默认投影的每个块只含 `id`、`kind`、`text`、`source_ids`、`asset`、`translation`、`translation_hash`、`review`、`user_edited`、`has_structure_note`，不含 `history`、长 `structure_note` 或 `source_change`；设置过表格模式的块另返回 `table_mode`，使译审能区分完整表体与原表文字对应。不附带整份 atoms。本批 `blocks` 仍是完整投影；`context` 与 `section_context` 里若某块 id 已出现在本批 `blocks`，该处只放引用壳 `{"id":...,"ref":true}`，不含 text / translation / translation_hash 等大字段。未进入本批的邻居或章节块仍是完整投影。`--full` 不去重，仍返回原始块。`issue_summary` 只统计未解决项。默认 `--limit` 为 16，只限制本批待办数量。默认投影的 `section_context` 有长度上限（默认 24 块），并附带 `section_window`（`section_total` / `section_offset` / `section_limit` / `truncated` 等）便于分段读取；CLI 可用 `--section-limit` / `--section-offset` 翻页。要整节、history 或全篇时用 `--full`，或加大 `--section-limit`。要核对全篇译文哈希时用 `show --full`。
 
 `progress` 默认投影保留 validate 的 `ok`、`blocks`（仍是块数量，不是块列表）、`translated`、`reviewed`，并加上 `outline_length`、`unresolved_issues`、`pending_translate`、`pending_review`、`error_summary`、`warning_summary`、`confirmed_limitations_summary` 和上述公共字段。`errors` 只保留非重复的结构性/问题错误（例如未解决的提取问题、全文复核缺失、对齐或数字差异）。大量形如 `b00001: missing translation`、`b00001: second-pass review required` 以及其他 `missing …` 的逐块错误收进 `error_summary`：`total` 加 `by_kind`，每类有 `count`、最多 5 个 `sample_ids` 和对应 `sample_messages`。不返回块正文或 atoms。`ok` 仍只由完整 validate 的 errors 决定，不因折叠而变成 true。已知限制不在默认投影里逐条展开。`confirmed_limitations_summary` 为 `total` 加 `by_category`：每类有 `count`、最多 3 个 `sample_ids`，以及一条共用短 `summary`（该类 resolution 压缩空白后最长约 120 字，不附 `resolution_evidence`）。`warnings` 只保留非限制类原文（例如失锚笔记）再加每类一条短注（类别、条数、样例 id、同一条短 summary）。`warning_summary` 为 `total`（压缩前的 warning 条数）、`confirmed_limitations`（被折叠的逐条限制 warning 数）、`other`（其余 warning 条数）和 `by_category`（各类条数）。完整的 `confirmed_limitations`（每项 `id`、`category`、`resolution`、`resolution_evidence`）和逐条 warning 仍由 `validate`、阅读界面、离线 HTML 和 `progress --full` 返回。
+
+## 阅读层次与表格展示
+
+`reference` 默认保留完整原文，`translation: null` 时无缺译或块级译审错误，不进入相关待办；仍须 `structure_note`，来源精确分区和全文复核不豁免，改写源文须提供本次 `source_change`。章节标题保持 `heading` 并翻译。已有或显式提交的参考文献译文仍要完整语义对齐和当前哈希的第二轮复核，用户修订与批注保留，不能因默认策略改变而跳过旧译文复核。界面默认较小字号单列；已有实际中文或目标侧批注/用户修订时保留对应显示，不删数据。
+
+`metadata` 与 `footnote` 是需翻译和复核的文本类型；区别只在显示层次，不降低对齐与复核要求。不带新类型的旧数据维持原有显示，不靠关键词自动改写。
+
+`table` 可在结构的完整 `blocks`、增量 `updates` 或 `merges` 设置 `table_mode: "image" | "text"`。省略时沿用完整表体模式。其他 kind 不能设置非空 `table_mode`；此字段随结构冻结，进入全文 fingerprint，旧文献未设置时 fingerprint 不变。
+
+- `image`：必须有文档目录内非空、核对过的 `asset` 和非空标签 `text`。`text` 只列待译的表头、行名及其他表内文字，每条一行，例如 `train steps\nPPL (dev)\nbase\nbig`；全部原表的 `source_ids` 不删不拆，数字与单元格关系由原图和不可变 atoms 保留。缩减显示文本必须给本次 `source_change`，说明只展示标签且原表数值完整保留。`translation.text` 为中文标签，语义组逐条对应；仍走相同翻译、块级复核、全文复核和导出校验。界面左侧显示原图、右侧按语义组显示英文标签及中文对应，窄屏折为上下；隐藏译文时只显示原表。新 PDF 裁图的范围检查使用全部来源 atoms，不能只用精选标签来证明完整。
+- `text` / 省略：保留完整原文和中文表体；支持行列数一致的 Markdown（可带分隔行）、竖线或制表符文本。界面渲染 HTML 单元格，保持空白、原始 Unicode 偏移、语义组联动及批注定位。不能可靠解析的旧文本回退原有显示，不猜补单元格；Agent 应在结构阶段改为可靠表格或核对过的原表图。合并单元格不在此纯文本表示能力内。
+
+表名与表注保留独立 `caption` 并完整翻译。`image` 的标签完整性与表格含义仍须 Agent 对照原稿判断，程序不会自动识别或翻译表头。更新界面不会改写既有已冻结文档或覆盖译文。
+
+## 图像与公式检查
+
+`crop` 除返回原有 `asset/page/bbox`，还在图像旁保存 `region-<hash>.crop.json`，记录页码、PDF point 裁剪范围、原件和图片 SHA-256。结构提交与 `validate` 对有关联元数据的 `figure` 检查：图片/原件指纹一致，来源文字位于同一页且落在裁图内（允许 2 point 的字形/边界误差）；超出时指出块和样例 atom，要求重裁或核对图块归属。图注可以位于图片之外，不使用该范围规则；旧图和自制合成图没有元数据时不推断覆盖已通过。该检查只涉及已登记的文字坐标，不证明无文字图形或箭头完整。
+
+无 `asset` 的 `formula` 块须有阅读器支持的 `$...$` / `$$...$$` 数学标记，否则结构提交及 `validate` 拒绝，要求对照原稿规范为 LaTeX 或提供已核对的公式图。检查不自动改式，也不证明数学意义或全部 LaTeX 语法正确。正文中的普通文本、货币和代码不受公式块规则影响。
+
+有图片、没有译文的 `figure/formula` 块默认不在正文重复显示提取文字；原始 `text/atoms/source_ids` 不删除，来源定位仍可用。独立 `caption`、表格正文、无图块及已有译文的块仍显示文字。
+
+## 表格行边界校验
+
+`check_translation` 在 `pair-offsets`、翻译提交和 `validate` 中检查：当 `table` 源文包含多行以 `|` 或制表符分隔的行时，译文不能被压成一个非空行；失败会指出块 ID 和 `table row boundaries lost`，由 Agent 恢复逐行文本后重新对齐与提交。不自动替 Agent 重建表格，也不改语义组。单行表格及其他块不受此规则影响。
+
+这只拦截明确的行边界全部丢失，不校验表格数值的行列归属、空白继承、合并单元格或译文语义；这些仍须按处理流程对照原稿核验。
+
+## 导出完整性
+
+`export ID [--output PATH]` 保留原有 `path`、`read_only` 和 `validation`，新增 `artifact_validation`：`ok`、`document_id`、`revision`、`embedded_assets`、`embedded_style_resources`、`bytes`、`sha256`、`browser_check`。导出内部核对完整文档快照与已复核数据、图片/原页资源一致，阅读器脚本/样式及样式资源已内嵌，UTF-8 声明位于前 1024 字节内，保存文件与校验内容一致。缺失或空资源、快照不一致、未内嵌静态资源等会导致命令失败，不返回成功交付。
+
+这项检查不执行 JavaScript，不验证视觉或交互；`browser_check` 固定为 `not_performed`，仅表示导出器没有执行浏览器检查。Agent 若另行实开应单独说明结果，不能把 `artifact_validation.ok` 称为页面渲染或语义质量验收。
 
 ## 可选结构候选
 
@@ -61,7 +94,7 @@ assemble DOC_ID review --blocks blocks.json --submission-id ID --agent NAME --ta
 ```json
 {"revision":0,"submission_id":"structure-1","agent":"current agent","operation":"structure","note":"核对原文页面与跨页次序","blocks":[{"id":"b00001","kind":"paragraph","text":"A. B.","source_ids":["a00001"],"structure_note":"源行顺序核对无误"}]}
 ```
-增量（不要带 `blocks`）：`keep_extracted: true`，或 `mode` 为 `keep` / `patch`。以当前提取块为起点。`updates` 按 id 修改可选字段 kind、text、source_ids、structure_note、asset、source_change。给出 `asset` 时必须是文档目录中已存在的非空文件名，不能用 `null` 或空字符串清空。每次改 `text` 或 `source_ids` 且结果与 atoms 不一致时，必须在**本次** update 里提供对应的 `source_change`，不能沿用旧理由。`merges` 把 `from` 各块的 source_ids 按顺序并入 `into`，删除 `from` 块，并且必须给 structure_note；可选 text、kind、source_change、asset。若合并时仍有多张不同的有效图片，必须显式给出合并后的 `asset`：非空字符串，且是文档目录里已有的文件名（不含 `/` 或 `\`）。只写上 `asset` 键，或填 `null`、空字符串、`false`，都不算显式资源，会被拒绝。禁止静默丢图。未提供 `asset` 且只有一张图时会保留该资源。`default_structure_note` 只填仍为空的说明，显式 updates/merges 的说明优先。提取已经正确时，可以只交这一条默认说明。最终每块仍要有非空 structure_note，atoms 仍须精确分区一次；改变源文字仍要 `source_change`。已有翻译或笔记后结构冻结。
+增量（不要带 `blocks`）：`keep_extracted: true`，或 `mode` 为 `keep` / `patch`。以当前提取块为起点。`updates` 按 id 修改可选字段 kind、text、source_ids、structure_note、asset、source_change、table_mode。给出 `asset` 时必须是文档目录中已存在的非空文件名，不能用 `null` 或空字符串清空。每次改 `text` 或 `source_ids` 且结果与 atoms 不一致时，必须在**本次** update 里提供对应的 `source_change`，不能沿用旧理由。`merges` 把 `from` 各块的 source_ids 按顺序并入 `into`，删除 `from` 块，并且必须给 structure_note；可选 text、kind、source_change、asset。若合并时仍有多张不同的有效图片，必须显式给出合并后的 `asset`：非空字符串，且是文档目录里已有的文件名（不含 `/` 或 `\`）。只写上 `asset` 键，或填 `null`、空字符串、`false`，都不算显式资源，会被拒绝。禁止静默丢图。未提供 `asset` 且只有一张图时会保留该资源。`default_structure_note` 只填仍为空的说明，显式 updates/merges 的说明优先。提取已经正确时，可以只交这一条默认说明。最终每块仍要有非空 structure_note，atoms 仍须精确分区一次；改变源文字仍要 `source_change`。已有翻译或笔记后结构冻结。
 ```json
 {"revision":0,"submission_id":"structure-keep-1","agent":"current agent","operation":"structure","note":"提取已核对","keep_extracted":true,"default_structure_note":"提取块与原文一致，予以保留","updates":[{"id":"b00002","kind":"heading","structure_note":"此行是标题"}],"merges":[{"into":"b00003","from":["b00004"],"text":"合并后的原文","structure_note":"跨页断行合并"}]}
 ```

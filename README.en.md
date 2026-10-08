@@ -34,6 +34,17 @@ All six formats use the same structure, translation, semantic alignment, second 
 
 Save web articles as local files before giving them to the Agent. This version does not run OCR or accept EPUB or other language directions. Extracted content still requires source-based structure review and translation review by the Agent.
 
+## Current source: reading and delivery improvements
+
+The user still only supplies a document and asks the Agent to translate with the Skill. Internal preparation and review remain automatic:
+
+- Author metadata and footnotes retain their associations at smaller sizes. References default to a single original-language column with a translated section heading, while entry completeness is still checked.
+- Complex numerical tables retain the complete original on the left and translated text labels on the right. Text-heavy or simple tables render as readable tables, with responsive layouts.
+- Rotated figure labels are not duplicated as body text. New crops record their bounds and check for omitted associated source text. Formulas use source-checked LaTeX / KaTeX or verified formula images.
+- Export checks the document snapshot and embedded resources. Browser inspection is optional; code checks do not replace original-source or semantic review.
+
+These improvements are in the current `main` source and are not included in the existing v0.5.0 slim zip. Updating the Skill does not automatically rewrite existing documents, user revisions, or notes.
+
 ## PDF structure assistance by default
 
 Scripts use page positions, columns, and line spacing to suggest paragraph groups and reading order, and flag difficult areas such as footnotes and equation fragments. The Agent checks and corrects these suggestions against the original pages before translation and review. Users do not need to understand structure candidates, run an extra command, or choose whether to enable them.
@@ -77,7 +88,7 @@ These are actual browser captures from two processed papers. See [media provenan
 1. **Give your Agent a document** and a separate workspace directory.
 2. **Understand and translate**: inspect extracted text and original pages, organize structure and terms, translate, and align semantic units.
 3. **Review and validate**: the Agent performs a second review; deterministic scripts check coverage, versions, and data completeness. Work can resume after interruption.
-4. **Export and read**: open the standalone HTML. Start the optional local library only when you need to save notes or revisions.
+4. **Export and read**: scripts automatically check the exported document snapshot and embedded resources. Browser inspection is an optional follow-up; ordinary translation does not require browser tools. Code checks do not establish visual or interaction correctness. Start the optional local library only when you need to save notes or revisions.
 
 The Skill defines the workflow; the Agent provides understanding and translation; scripts process and validate data; HTML provides the reader. Importing alone does **not** invoke a model. Translation uses the host Agent's session and usage allowance.
 
@@ -93,7 +104,7 @@ https://github.com/BananaSoldier01/agent-paper-reader
 
 Read the repository README and SKILL.md first, then install the complete
 Skill from the current main branch using a method supported by this Agent.
-Use the v0.5.0 slim install zip or current main source for multiple input formats, default PDF structure assistance, smaller task payloads, and the complete review workflow; older install packages may lack these features.
+Install from the latest main source for the current figure, table, formula, reading-layout, and export-validation improvements; the existing v0.5.0 slim zip does not include these later changes.
 Confirm the appropriate installation directory and check prerequisites,
 including Python 3.12+. Preserve existing configuration and document data.
 When finished, tell me where it is installed, whether it is ready to use,

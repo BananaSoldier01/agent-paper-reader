@@ -65,6 +65,52 @@ def test_malformed_alignment_and_numeric_gate(doc):
     d=user_edit(d['id'],{'revision':d['revision'],'operation':'translation','block_id':b['id'],'pair_id':'g1','text':'6 MW'})
     assert any('unexplained' in e for e in validate(d)['errors'])
 
+@pytest.mark.parametrize('separator', ['|', '\t'])
+def test_collapsed_table_rows_rejected_even_with_complete_alignment(separator):
+    source = f'Model {separator} Score\nAlpha {separator} 8\nBeta {separator} 9'
+    target = f'模型 {separator} 分数 甲 {separator} 8 乙 {separator} 9'
+    block = {'id': 'table-fixture', 'kind': 'table', 'text': source}
+    translation = {'text': target, 'pairs': [{'id': 'g1', 'source': [[0, len(source)]],
+                                            'target': [[0, len(target)]]}]}
+    with pytest.raises(ValueError, match='table row boundaries lost'):
+        check_translation(block, translation)
+
+
+@pytest.mark.parametrize('kind, source, target', [
+    ('table', 'Model | Score\nAlpha | 8\nBeta | 9', '模型 | 分数\n甲 | 8\n乙 | 9'),
+    ('table', 'Model\tScore\nAlpha\t8', '模型\t分数\n甲\t8'),
+    ('table', '| Model | Score |\n| --- | --- |\n| Alpha | 8 |', '| 模型 | 分数 |\n| --- | --- |\n| 甲 | 8 |'),
+    ('table', 'Accuracy | 8', '准确率 | 8'),
+    ('paragraph', 'A | B\nC | D', '甲 | 乙 丙 | 丁'),
+])
+def test_table_row_gate_accepts_preserved_rows_and_other_blocks(kind, source, target):
+    block = {'id': 'row-fixture', 'kind': kind, 'text': source}
+    check_translation(block, {'text': target, 'pairs': [{'id': 'g1', 'source': [[0, len(source)]],
+                                                        'target': [[0, len(target)]]}]})
+
+
+def test_table_row_gate_applies_to_submit_validate_and_pair_offsets(doc):
+    from reader.store import read
+    blocks = copy.deepcopy(doc['blocks'])
+    blocks[1].update(kind='table', text='Item | State\nA | 5 kW\nB | safe',
+                     source_change='Reshape this authored fixture into a table for row-boundary testing.')
+    d = send(doc, 'structure', blocks=blocks, note='Synthetic table checked')
+    table = d['blocks'][1]
+    target = '项目 | 状态 甲 | 5 kW 乙 | 安全'
+    value = {'text': target, 'pairs': [{'id': 'g1', 'source': [[0, len(table['text'])]],
+                                      'target': [[0, len(target)]]}]}
+    with pytest.raises(ValueError, match='table row boundaries lost'):
+        send(d, 'translate', blocks=[{'id': table['id'], 'translation': value}])
+    assert read(d['id'])['revision'] == d['revision']
+    with pytest.raises(ValueError, match='table row boundaries lost'):
+        fill_pair_offsets(d, [{'id': table['id'], 'translation': {'text': target, 'whole': True}}])
+    candidate = copy.deepcopy(d)
+    candidate['blocks'][1]['translation'] = value
+    assert any('table row boundaries lost' in error for error in validate(candidate)['errors'])
+    good = translated(d)
+    assert good['blocks'][1]['translation']['text'].splitlines() == table['text'].splitlines()
+
+
 def test_simultaneous_writers(doc):
     def write(i):
         try:return user_edit(doc['id'],{'revision':doc['revision'],'operation':'reading','reading':{'block_id':str(i)}})['revision']
