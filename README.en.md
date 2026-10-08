@@ -43,7 +43,7 @@ The user still only supplies a document and asks the Agent to translate with the
 - Rotated figure labels are not duplicated as body text. New crops record their bounds and check for omitted associated source text. Formulas use source-checked LaTeX / KaTeX or verified formula images.
 - Export checks the document snapshot and embedded resources. Browser inspection is optional; code checks do not replace original-source or semantic review.
 
-These improvements are in the current `main` source and are not included in the existing v0.5.0 slim zip. Updating the Skill does not automatically rewrite existing documents, user revisions, or notes.
+These improvements are available in `main` and the [v0.5.0 slim zip updated on 2026-10-08](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip). Updating the Skill does not automatically rewrite existing documents, user revisions, or notes.
 
 ## PDF structure assistance by default
 
@@ -104,7 +104,7 @@ https://github.com/BananaSoldier01/agent-paper-reader
 
 Read the repository README and SKILL.md first, then install the complete
 Skill from the current main branch using a method supported by this Agent.
-Install from the latest main source for the current figure, table, formula, reading-layout, and export-validation improvements; the existing v0.5.0 slim zip does not include these later changes.
+Install from the latest main source or the updated v0.5.0 agent-paper-reader.zip for the current figure, table, formula, reading-layout, and export-validation improvements.
 Confirm the appropriate installation directory and check prerequisites,
 including Python 3.12+. Preserve existing configuration and document data.
 When finished, tell me where it is installed, whether it is ready to use,
@@ -136,7 +136,9 @@ Missing dependencies, failed conversion, or unreliable output leave the original
 
 For the multiple input formats listed here, download the [main source ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip), extract it, and place the complete source directory in your Agent's Skill directory under the name `agent-paper-reader`.
 
-The [v0.5.0 slim install zip](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip) adds default PDF structure assistance and fixes image provenance during structural changes. It retains six input formats, incremental structure updates, section paging, deduplicated task projections, semantic-group offset calculation, snapshot-bound submissions, and visible known limitations. The default task batch is 16; block review, whole-document review, and validation requirements remain in place. Existing users should update the Skill program directory while preserving their external document workspace. The [v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) zip remains PDF/Markdown only.
+The [v0.5.0 slim install zip](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip) adds default PDF structure assistance and fixes image provenance during structural changes. It retains six input formats, incremental structure updates, section paging, deduplicated task projections, semantic-group offset calculation, snapshot-bound submissions, and visible known limitations. The installer was refreshed on 2026-10-08 with figure, table, formula, author/footnote typography, original-language references, and export-validation improvements. The default task batch is 16; translations still require block review, whole-document review, and validation. Existing users should update the Skill program directory while preserving their external document workspace. The [v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) zip remains PDF/Markdown only.
+
+The updated installer is built from commit `5b9b080`; see the [Release notes and SHA256SUMS](https://github.com/BananaSoldier01/agent-paper-reader/releases/tag/v0.5.0) for its checksum. The original `v0.5.0` source tag remains unchanged. GitHub’s automatic Source code archives still follow that tag; install this update from the named `agent-paper-reader.zip` asset or the latest `main` source.
 
 This repository is also a complete Skill, with [SKILL.md](SKILL.md) as its entry point. You can install the full repository contents; **do not copy only SKILL.md**. For a project supporting `.agents/skills`:
 
