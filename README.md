@@ -39,11 +39,12 @@
 用户仍只需提供文献并要求使用 Skill 翻译，Agent 会完成内部整理与复核：
 
 - 作者信息与脚注保留对应关系，采用较小字号；参考文献默认原文单列保留，只翻章节标题，仍检查条目完整性。
-- 复杂数值表左侧保留完整原表，右侧给出表内文字的中文对应；文字型或简单表格渲染为可读表格，窄屏自动调整布局。
-- 图内旋转文字不重复铺成正文；新裁图记录范围并检查已关联文字是否遗漏，公式按原稿使用 LaTeX / KaTeX 或核对过的公式图。
+- 复杂数值表左侧保留完整原表，右侧只列需翻译或解释的独立标签，参数与缩写给出中文含义，重复说明合并并保护批注和用户修订；文字型或简单表格渲染为可读表格，窄屏自动调整布局。
+- 图内旋转文字不重复铺成正文；新裁图记录范围、检查已关联文字是否遗漏，并提示底纹、色条等内容接触边缘的风险，由 Agent 对照原页判断是否重裁；公式按原稿使用 LaTeX / KaTeX 或核对过的公式图。
+- 本段术语分别匹配全称与缩写（如 `feed-forward network / FFN`），保留词边界。
 - 导出自动检查文档快照和内嵌资源，浏览器验收按需补充；代码检查不替代原稿核对和语义复核。
 
-以上优化已同步到 `main` 和 2026-10-08 更新的 [v0.5.0 精简安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip)。已有文献、用户修订和笔记不会因更新 Skill 自动改写。
+以上优化已同步到 `main` 和 2026-10-09 更新的 [v0.5.0 精简安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip)。已有文献、用户修订和笔记不会因更新 Skill 自动改写。
 
 ## 默认辅助整理 PDF 结构
 
@@ -135,9 +136,9 @@ Agent 可以获取仓库或发布包，并按当前环境完成安装检查。**
 
 需要本页所列多格式功能时，下载 [main 分支源码 ZIP](https://github.com/BananaSoldier01/agent-paper-reader/archive/refs/heads/main.zip)，解压后将完整源码目录放入你的 Agent 支持的 Skill 目录，并命名为 `agent-paper-reader`。
 
-[v0.5.0 精简安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip) 新增默认 PDF 结构辅助，并修复结构调整时图片的来源归属。继续包含六种输入、增量结构、章节分页、任务投影去重、语义组偏移计算、快照绑定提交和已知限制披露。2026-10-08 已更新安装包，加入图表、公式、作者脚注字号、参考文献单列及导出校验优化。默认任务批量为 16，译文仍需块级复核、全文复核和校验。已有用户更新 Skill 程序目录并保留目录外的文献工作区；[v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) 仍仅 PDF / Markdown，请勿当作最新包。
+[v0.5.0 精简安装包](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.5.0/agent-paper-reader.zip) 新增默认 PDF 结构辅助，并修复结构调整时图片的来源归属。继续包含六种输入、增量结构、章节分页、任务投影去重、语义组偏移计算、快照绑定提交和已知限制披露。安装包于 2026-10-08 加入图表、公式、作者脚注字号、参考文献单列及导出校验优化，2026-10-09 再加入表格标签释义与去重、术语别名匹配和裁图边缘风险提示。默认任务批量为 16，译文仍需块级复核、全文复核和校验。已有用户更新 Skill 程序目录并保留目录外的文献工作区；[v0.1.0](https://github.com/BananaSoldier01/agent-paper-reader/releases/download/v0.1.0/agent-paper-reader.zip) 仍仅 PDF / Markdown，请勿当作最新包。
 
-本次安装包来自提交 `5b9b080`，下载校验值见 [Release 说明与 SHA256SUMS](https://github.com/BananaSoldier01/agent-paper-reader/releases/tag/v0.5.0)。原始 `v0.5.0` 源码标签保留；GitHub 自动附带的 Source code 归档对应原标签，安装本次更新请用命名的 `agent-paper-reader.zip` 附件或 `main` 最新源码。
+本次安装包的构建提交与下载校验值见 [Release 说明与 SHA256SUMS](https://github.com/BananaSoldier01/agent-paper-reader/releases/tag/v0.5.0)。原始 `v0.5.0` 源码标签保留；GitHub 自动附带的 Source code 归档对应原标签，安装本次更新请用命名的 `agent-paper-reader.zip` 附件或 `main` 最新源码。
 
 本仓库根目录本身也是完整 Skill，入口为 [SKILL.md](SKILL.md)。可以安装完整仓库内容，**不要只复制 SKILL.md**。例如，支持 `.agents/skills` 的项目可以采用：
 

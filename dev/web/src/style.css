@@ -37,7 +37,7 @@ html,body,#root{width:100%;min-height:100%;margin:0}
 .table-scroll th{background:#f3f6f1;font-weight:600}
 .table-scroll .sentence{white-space:pre-wrap}
 @media(max-width:1000px){.table-image-layout{grid-template-columns:minmax(0,1.8fr) minmax(210px,1fr);gap:18px}}
-@media(max-width:700px){.table-image-layout{grid-template-columns:minmax(0,1fr)}.table-image-layout .table-glossary .pair-row{grid-template-columns:minmax(0,1fr) minmax(0,1.2fr)}.table-glossary .target{border:0;padding:0}}
+@media(max-width:900px){.table-image-layout{grid-template-columns:minmax(0,1fr)}.table-image-layout .table-glossary .pair-row{grid-template-columns:minmax(0,1fr) minmax(0,1.2fr)}.table-glossary .target{border:0;padding:0}}
 .paper article.figure{max-height:none;margin:12px 0 0}
 .paper .figure img{display:block;margin:auto}
 nav button[data-level="3"]{padding-left:22px;font-size:12px}

@@ -1,6 +1,73 @@
 import pypdfium2 as pdfium
 import json
+from math import ceil
+from PIL import Image
 from .store import read,folder,digest,atomic
+
+
+def crop_edge_risks(image):
+    """Advisory: visible content near an edge can be clipped or a natural border."""
+    rgba = image.convert('RGBA')
+    background = Image.new('RGBA', rgba.size, 'white')
+    background.alpha_composite(rgba)
+    image = background.convert('RGB')
+    width, height = image.size
+    bands = {
+        'top': image.crop((0, 0, width, min(2, height))),
+        'right': image.crop((max(0, width-2), 0, width, height)),
+        'bottom': image.crop((0, max(0, height-2), width, height)),
+        'left': image.crop((0, 0, min(2, width), height)),
+    }
+    risks = []
+    for side, band in bands.items():
+        horizontal = side in ('top', 'bottom')
+        length = width if horizontal else height
+        required = max(3, ceil(length * .005))
+        run = 0
+        pixels = band.load()
+        for i in range(length):
+            visible = any(min(pixels[i, j] if horizontal else pixels[j, i]) < 245
+                          for j in range(band.height if horizontal else band.width))
+            run = run + 1 if visible else 0
+            if run >= required:
+                risks.append(side)
+                break
+    return risks
+
+
+def _suggested_bbox(bbox, risks, info):
+    # A starting point for source-page review, not an automatically certified crop.
+    x0, y0, x1, y1 = bbox
+    return [max(0, x0-10) if 'left' in risks else x0,
+            max(0, y0-10) if 'top' in risks else y0,
+            min(info['width'], x1+10) if 'right' in risks else x1,
+            min(info['height'], y1+10) if 'bottom' in risks else y1]
+
+
+def crop_edge_warning(doc, block):
+    asset = block.get('asset')
+    if not asset:
+        return None
+    path = folder(doc['id']) / asset
+    metadata_path = path.with_suffix('.crop.json')
+    if not metadata_path.is_file():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text('utf-8'))
+        if (metadata['source_sha256'] != doc['source_sha256'] or
+                metadata['asset_sha256'] != digest(path.read_bytes())):
+            return None  # The existing provenance error is actionable first.
+        risks = metadata.get('edge_risks')
+        if not isinstance(risks, list) or any(s not in ('top', 'right', 'bottom', 'left') for s in risks):
+            with Image.open(path) as image:
+                risks = crop_edge_risks(image)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if risks:
+        return (f'{block["id"]}: crop edge risk ({", ".join(risks)}); visible content reaches '
+                'the border; compare with the source page and recrop if clipped '
+                '(border contact alone is not proof of clipping)')
+    return None
 
 
 def crop_coverage_error(doc, block):
@@ -54,7 +121,12 @@ def crop(doc_id,page,bbox):
             image=pdf[page-1].render(scale=2).to_pil()
             image.crop(tuple(round(v*2) for v in bbox)).save(path)
         finally:pdf.close()
+    with Image.open(path) as image:
+        risks = crop_edge_risks(image)
     metadata={'page':page,'bbox':list(bbox),'source_sha256':doc['source_sha256'],
-              'asset_sha256':digest(path.read_bytes())}
+              'asset_sha256':digest(path.read_bytes()),'edge_risks':risks}
     atomic(path.with_suffix('.crop.json'),metadata)
-    return {'asset':name,'page':page,'bbox':bbox}
+    result = {'asset':name,'page':page,'bbox':bbox,'edge_risks':risks}
+    if risks:
+        result['suggested_bbox'] = _suggested_bbox(bbox, risks, info)
+    return result

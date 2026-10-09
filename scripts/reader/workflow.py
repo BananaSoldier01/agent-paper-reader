@@ -2,7 +2,7 @@ import copy
 import re
 from collections import Counter
 from .store import mutate, digest, folder
-from .regions import crop_coverage_error
+from .regions import crop_coverage_error, crop_edge_warning
 
 KINDS = {'paragraph','metadata','footnote','heading','caption','figure','table','formula','reference','code','page','excluded','unclassified'}
 VERBATIM = {'figure','formula','code','page','excluded'}
@@ -256,6 +256,9 @@ def validate(doc):
         visual_error = visual_content_error(doc, b)
         if visual_error:
             errors.append(visual_error)
+        edge_warning = crop_edge_warning(doc, b)
+        if edge_warning:
+            warnings.append(edge_warning)
         if b['kind'] == 'reference' and not (b.get('text') or '').strip():
             errors.append(f"{b['id']}: preserved reference text cannot be empty")
         if not needs_translation(b):

@@ -6,7 +6,7 @@ import pytest
 
 from reader import store
 from reader.importer import import_document
-from reader.regions import crop, crop_coverage_error
+from reader.regions import crop, crop_coverage_error, crop_edge_risks, crop_edge_warning
 from reader.workflow import submit, validate, visual_content_error
 
 
@@ -118,6 +118,69 @@ def test_image_table_crop_checks_all_source_atoms_not_only_displayed_labels(figu
         submit(doc['id'], {'operation': 'structure', 'revision': 0, 'submission_id': 'partial-table',
                            'agent': 'fixture', 'note': 'Inspect all table source bounds', 'blocks': rows})
     assert store.read(doc['id'])['revision'] == 0
+
+
+def test_non_text_edges_warn_when_all_text_bounds_fit(figure_doc):
+    doc, rows, figure = figure_doc
+    # Rectangle tops/bottoms extend beyond the crop, while both labels fit.
+    clipped = crop(doc['id'], 1, [40, 180, 370, 580])
+    figure['asset'] = clipped['asset']
+    assert crop_coverage_error(doc, figure) is None
+    assert clipped['bbox'] == [40, 180, 370, 580]  # Never silently expand.
+    assert clipped['edge_risks'] == ['top', 'bottom']
+    assert clipped['suggested_bbox'] == [40, 170, 370, 590]
+    saved = submit(doc['id'], {'operation': 'structure', 'revision': 0, 'submission_id': 'edge-risk',
+                               'agent': 'fixture', 'note': 'Text fits; inspect graphical edges', 'blocks': rows})
+    result = validate(saved)
+    assert any('crop edge risk (top, bottom)' in w for w in result['warnings'])
+    assert not any('crop edge risk' in e for e in result['errors'])
+    # A suggestion is a starting point; this diagram needs another 2 points at the bottom.
+    expanded = crop(doc['id'], 1, clipped['suggested_bbox'])
+    assert expanded['edge_risks'] == ['bottom']
+    full = crop(doc['id'], 1, [40, 170, 370, 610])
+    figure['asset'] = full['asset']
+    assert full['edge_risks'] == []
+    assert 'suggested_bbox' not in full
+    assert crop_edge_warning(doc, figure) is None
+
+
+def test_old_crop_edge_check_is_read_only_and_requires_provenance(figure_doc):
+    doc, _rows, figure = figure_doc
+    clipped = crop(doc['id'], 1, [40, 180, 370, 580])
+    figure['asset'] = clipped['asset']
+    metadata_path = (store.folder(doc['id'])/clipped['asset']).with_suffix('.crop.json')
+    metadata = json.loads(metadata_path.read_text())
+    del metadata['edge_risks']
+    metadata_path.write_text(json.dumps(metadata))
+    before = metadata_path.read_bytes()
+    assert 'crop edge risk' in crop_edge_warning(doc, figure)
+    assert metadata_path.read_bytes() == before
+    metadata_path.unlink()
+    assert crop_edge_warning(doc, figure) is None
+
+
+def test_edge_pixels_ignore_transparency_and_isolated_specks():
+    from PIL import Image, ImageDraw
+    image = Image.new('RGBA', (100, 60), (0, 0, 0, 0))
+    assert crop_edge_risks(image) == []
+    image.putpixel((50, 0), (0, 0, 0, 255))
+    assert crop_edge_risks(image) == []
+    ImageDraw.Draw(image).rectangle((20, 0, 35, 1), fill=(211, 211, 211, 255))
+    assert crop_edge_risks(image) == ['top']
+
+
+def test_full_page_border_suggestion_stays_inside_page(figure_doc):
+    from PIL import Image, ImageDraw
+    doc, _rows, _figure = figure_doc
+    full = crop(doc['id'], 1, [0, 0, 612, 792])
+    path = store.folder(doc['id'])/full['asset']
+    with Image.open(path) as image:
+        ImageDraw.Draw(image).line((0, 0, image.width-1, 0), fill='black', width=2)
+        image.save(path)
+    # Existing crop files are reused, and provenance refreshed only by an explicit crop call.
+    repeated = crop(doc['id'], 1, [0, 0, 612, 792])
+    assert 'top' in repeated['edge_risks']
+    assert repeated['suggested_bbox'][1] == 0
 
 
 @pytest.mark.parametrize('text', ['MultiHead(Q,K,V) = Concat(head₁,…,head_h)Wᴼ',
